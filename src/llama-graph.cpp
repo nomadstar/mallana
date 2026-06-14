@@ -2360,9 +2360,9 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * block_table = nullptr;
     uint32_t block_size = 0;
-    if (mctx_cur->get_base()->get_kv()->pa_total_blocks > 0) {
+    if (mctx_cur->get_kv()->pa_total_blocks > 0) {
         block_table = inp->block_table;
-        block_size = mctx_cur->get_base()->get_kv()->pa_block_size;
+        block_size = mctx_cur->get_kv()->pa_block_size;
     }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, block_table, block_size, sinks, v_mla, kq_scale, il);
