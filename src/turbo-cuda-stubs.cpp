@@ -40,9 +40,11 @@ __attribute__((weak)) void turbo_innerq_mark_tensor_updated(void) {
 // They are never called in practice on CPU-only builds because
 // llama-triattention.cpp checks gpu_enabled before invoking them.
 
-struct triattention_gpu_state {};
+struct triattention_gpu_state;
 struct triattention_gpu_head_calib;
 struct triattention_gpu_config;
+
+extern "C" {
 
 __attribute__((weak))
 triattention_gpu_state * triattention_gpu_init(
@@ -96,3 +98,5 @@ void triattention_gpu_free(triattention_gpu_state *)
 {
     // no-op
 }
+
+} // extern "C"
