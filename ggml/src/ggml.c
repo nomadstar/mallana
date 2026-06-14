@@ -5326,7 +5326,9 @@ struct ggml_tensor * ggml_flash_attn_ext(
         struct ggml_tensor  * mask,
         float                 scale,
         float                 max_bias,
-        float                 logit_softcap) {
+        float                 logit_softcap,
+        struct ggml_tensor  * block_table,
+        int                   block_size) {
     GGML_ASSERT(ggml_can_mul_mat(k, q));
     // TODO: check if vT can be multiplied by (k*qT)
 
@@ -5350,7 +5352,7 @@ struct ggml_tensor * ggml_flash_attn_ext(
     int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
-    float params[] = { scale, max_bias, logit_softcap };
+    float params[] = { scale, max_bias, logit_softcap, (float)block_size };
     ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = GGML_OP_FLASH_ATTN_EXT;
@@ -5358,6 +5360,7 @@ struct ggml_tensor * ggml_flash_attn_ext(
     result->src[1] = k;
     result->src[2] = v;
     result->src[3] = mask;
+    result->src[4] = block_table;
 
     return result;
 }
@@ -5385,16 +5388,16 @@ void ggml_flash_attn_ext_add_sinks(
         struct ggml_tensor * a,
         struct ggml_tensor * sinks) {
     if (!sinks) {
-        a->src[4] = NULL;
+        a->src[5] = NULL;
         return;
     }
 
     GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
-    GGML_ASSERT(a->src[4] == NULL);
+    GGML_ASSERT(a->src[5] == NULL);
     GGML_ASSERT(a->src[0]->ne[2] == sinks->ne[0]);
     GGML_ASSERT(sinks->type == GGML_TYPE_F32);
 
-    a->src[4] = sinks;
+    a->src[5] = sinks;
 }
 
 // ggml_flash_attn_back

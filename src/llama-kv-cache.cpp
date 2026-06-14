@@ -358,6 +358,18 @@ llama_kv_cache::llama_kv_cache(
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+
+    // Inicializar el PagedAttention Block Allocator
+    const char * LLAMA_KV_CACHE_BLOCK_SIZE = getenv("LLAMA_KV_CACHE_BLOCK_SIZE");
+    uint32_t block_size = LLAMA_KV_CACHE_BLOCK_SIZE ? atoi(LLAMA_KV_CACHE_BLOCK_SIZE) : 16;
+    
+    if (block_size != 16 && block_size != 32 && block_size != 64) {
+        LLAMA_LOG_WARN("%s: Advertencia: block_size %u puede no ser óptimo. La arquitectura PagedAttention recomienda bloques de 16, 32 o 64 tokens para alinearse con los Warps de la GPU (Tensor Cores/MFMA).\n", __func__, block_size);
+    } else {
+        LLAMA_LOG_INFO("%s: PagedAttention activo. Usando block_size recomendado: %u tokens (óptimo para la arquitectura del acelerador).\n", __func__, block_size);
+    }
+
+    block_allocator_init(kv_size, block_size);
 }
 
 llama_kv_cache::~llama_kv_cache() {
@@ -2655,4 +2667,55 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+//
+// PagedAttention Block Allocator API
+//
+
+void llama_kv_cache::block_allocator_init(uint32_t total_tokens, uint32_t block_size) {
+    this->pa_block_size = block_size;
+    this->pa_total_blocks = total_tokens / block_size;
+    
+    pa_free_blocks.clear();
+    pa_block_tables.clear();
+    
+    pa_global_block_table.resize(pa_total_blocks);
+    for (uint32_t i = 0; i < pa_total_blocks; i++) {
+        pa_global_block_table[i] = i; // Identity mapping by default
+    }
+
+    // Llenar el pool de bloques libres (en orden inverso para usar pop_back)
+    pa_free_blocks.reserve(pa_total_blocks);
+    for (int32_t i = pa_total_blocks - 1; i >= 0; --i) {
+        pa_free_blocks.push_back(i);
+    }
+
+    LLAMA_LOG_INFO("%s: initialized PagedAttention block allocator with %u blocks of size %u tokens\n",
+            __func__, pa_total_blocks, pa_block_size);
+}
+
+int32_t llama_kv_cache::block_allocate() {
+    if (pa_free_blocks.empty()) {
+        return -1; // Out of Memory (OOM)
+    }
+    
+    uint32_t block_id = pa_free_blocks.back();
+    pa_free_blocks.pop_back();
+    
+    return block_id;
+}
+
+void llama_kv_cache::block_free(uint32_t block_id) {
+    pa_free_blocks.push_back(block_id);
+}
+
+const std::vector<uint32_t> & llama_kv_cache::get_block_table(llama_seq_id seq_id) const {
+    auto it = pa_block_tables.find(seq_id);
+    if (it != pa_block_tables.end()) {
+        return it->second;
+    }
+    
+    static const std::vector<uint32_t> empty_table;
+    return empty_table;
 }

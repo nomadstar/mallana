@@ -40,7 +40,9 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33);
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int32_t * __restrict__ block_table,
+        const int32_t block_size);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -1191,7 +1193,8 @@ void launch_fattn(
     const bool V_is_K_view = V->view_src && (V->view_src == K || (V->view_src == K->view_src && V->view_offs == K->view_offs));
 
     const ggml_tensor * mask  = dst->src[3];
-    const ggml_tensor * sinks = dst->src[4];
+    const ggml_tensor * block_table = dst->src[4];
+    const ggml_tensor * sinks = dst->src[5];
 
     ggml_tensor * KQV = dst;
 
@@ -1381,6 +1384,12 @@ void launch_fattn(
     memcpy(&scale,         (const float *) KQV->op_params + 0, sizeof(float));
     memcpy(&max_bias,      (const float *) KQV->op_params + 1, sizeof(float));
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+    int block_size = 16;
+    {
+        float bs_f = 16.0f;
+        memcpy(&bs_f, (const float *) KQV->op_params + 3, sizeof(float));
+        block_size = (int)bs_f;
+    }
 
     if (logit_softcap != 0.0f) {
         scale /= logit_softcap;
@@ -1409,7 +1418,9 @@ void launch_fattn(
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
+        block_table ? ((const int32_t *) block_table->data) : nullptr,
+        block_size
     );
     CUDA_CHECK(cudaGetLastError());
 

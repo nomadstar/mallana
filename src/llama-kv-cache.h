@@ -211,6 +211,22 @@ public:
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     //
+    // PagedAttention / Block Allocator API
+    //
+
+    // Inicializar el pool de bloques lógicos
+    void block_allocator_init(uint32_t total_tokens, uint32_t block_size);
+    
+    // Asignar un nuevo bloque libre. Devuelve el ID del bloque o -1 si no hay memoria.
+    int32_t block_allocate();
+    
+    // Liberar un bloque físico de memoria
+    void block_free(uint32_t block_id);
+
+    // Obtener la tabla de bloques (Page Table) de una secuencia específica
+    const std::vector<uint32_t> & get_block_table(llama_seq_id seq_id) const;
+
+    //
     // TriAttention KV cache eviction
     //
 
@@ -246,6 +262,13 @@ private:
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
+
+    // PagedAttention Internal State
+    uint32_t pa_block_size = 16;
+    uint32_t pa_total_blocks = 0;
+    std::vector<uint32_t> pa_free_blocks;
+    std::unordered_map<llama_seq_id, std::vector<uint32_t>> pa_block_tables;
+    std::vector<int32_t> pa_global_block_table; // Maps logical block to physical block
 
     // required padding
     const uint32_t n_pad = 1;
