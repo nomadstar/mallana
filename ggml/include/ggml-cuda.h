@@ -43,6 +43,9 @@ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 
 // ---- TriAttention GPU scoring ----
+// Only available when CUDA backend is compiled in
+#ifdef GGML_USE_CUDA
+
 // Opaque handle for GPU-resident scoring state
 typedef struct triattention_gpu_state triattention_gpu_state;
 
@@ -104,6 +107,20 @@ GGML_BACKEND_API void triattention_gpu_upload_cells(
 GGML_BACKEND_API float * triattention_gpu_alloc_scores(uint32_t n_cells, void * stream);
 GGML_BACKEND_API void    triattention_gpu_free_dev(void * ptr);
 GGML_BACKEND_API void    triattention_gpu_free(triattention_gpu_state * state);
+
+#else
+// CPU-only stubs so that llama-triattention.cpp compiles without CUDA
+typedef struct triattention_gpu_state triattention_gpu_state;
+struct triattention_gpu_head_calib { const float *q_mean_real, *q_mean_imag, *q_mean_abs, *extra_weight; };
+struct triattention_gpu_config { uint32_t head_dim, freq_count, n_kv_heads, n_sampled, n_offsets; enum ggml_type k_type; bool need_wht_inv, disable_trig; };
+static inline triattention_gpu_state * triattention_gpu_init(const struct triattention_gpu_config *, const struct triattention_gpu_head_calib *, const float *, const float *, const float *, void *) { return NULL; }
+static inline void    triattention_gpu_score_head(triattention_gpu_state *, const void *, uint64_t, size_t, uint32_t, uint32_t, const uint32_t *, const int32_t *, uint32_t, int64_t, int, float *, void *) {}
+static inline void    triattention_gpu_scores_to_host(float *, const float *, uint32_t, void *) {}
+static inline void    triattention_gpu_upload_cells(uint32_t **, int32_t **, const uint32_t *, const int32_t *, uint32_t, void *) {}
+static inline float * triattention_gpu_alloc_scores(uint32_t, void *) { return NULL; }
+static inline void    triattention_gpu_free_dev(void *) {}
+static inline void    triattention_gpu_free(triattention_gpu_state *) {}
+#endif
 
 #ifdef  __cplusplus
 }
