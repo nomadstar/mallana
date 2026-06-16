@@ -1217,6 +1217,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--no-log-prefix", "--no-log-timestamps"},
+        "ignored for compatibility with ollama",
+        [](common_params & params) {}
+    ));
+    add_opt(common_arg(
         {"-lcs", "--lookup-cache-static"}, "FNAME",
         "path to static lookup cache to use for lookup decoding (not updated by generation)",
         [](common_params & params, const std::string & value) {
