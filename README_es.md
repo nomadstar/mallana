@@ -139,8 +139,8 @@ OLLAMA_NUM_PARALLEL=4 ./ollama serve
 
 | Rama | Descripción |
 |--------|-------------|
+| `main` | **Por defecto** — Incluye PagedAttention (más reciente) |
 | `feature/triattention` | Base de TurboQuant + TriAttention |
-| `feature/paged-attention` | **Por defecto** — Incluye PagedAttention (más reciente) |
 | `master` | Base del llama.cpp upstream |
 
 ---
