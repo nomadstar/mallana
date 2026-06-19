@@ -139,8 +139,7 @@ OLLAMA_NUM_PARALLEL=4 ./ollama serve
 
 | Branch | Description |
 |--------|-------------|
-| `main` | **Default** — Includes PagedAttention (latest) |
-| `feature/triattention` | TurboQuant + TriAttention base |
+| `feature/triattention` | **Default** — TurboQuant + TriAttention base + PagedAttention (latest) |
 | `master` | Upstream llama.cpp base |
 
 ---
