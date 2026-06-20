@@ -143,3 +143,6 @@ poetry.toml
 /.windsurf/
 # emscripten
 a.out.*
+
+# Secret README
+.SECRET_README.md
