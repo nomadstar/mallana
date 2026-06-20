@@ -340,12 +340,13 @@ void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGM
     }
     if (k % group_size != 0) group_size = (group_size == 128) ? 64 : 128;
     assert(k % group_size == 0);
+    assert(group_size <= 256);
 
-    const int n_groups = k / group_size;
+    const int n_groups = (int)(k / group_size);
     const int blocks_per_group = group_size / QK_TURBO3;
 
     for (int g = 0; g < n_groups; g++) {
-        float buf[128];
+        float buf[256];
         const block_turbo3_0 * grp_src = x + g * blocks_per_group;
         float * grp_dst = y + g * group_size;
 
@@ -458,12 +459,13 @@ void dequantize_row_turbo2_0(const block_turbo2_0 * GGML_RESTRICT x, float * GGM
     }
     if (k % group_size != 0) group_size = (group_size == 128) ? 64 : 128;
     assert(k % group_size == 0);
+    assert(group_size <= 256);
 
-    const int n_groups = k / group_size;
+    const int n_groups = (int)(k / group_size);
     const int blocks_per_group = group_size / QK_TURBO2;
 
     for (int g = 0; g < n_groups; g++) {
-        float buf[128];
+        float buf[256];
         const block_turbo2_0 * grp_src = x + g * blocks_per_group;
         float * grp_dst = y + g * group_size;
 
