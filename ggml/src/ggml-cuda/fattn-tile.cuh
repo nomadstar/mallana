@@ -584,7 +584,8 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         const int col_Q_0,
         const char * block_table,
         const int block_size,
-        const int sequence) {
+        const int sequence,
+        const int ne11) {
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
@@ -617,12 +618,12 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < DKQ - nbatch_K_last; k_KQ_0 += nbatch_K) {
         flash_attn_tile_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>(
-            Q_tmp, K_h2, KV_tmp, stride_K2, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc, block_table, block_size, sequence, ne01.x);
+            Q_tmp, K_h2, KV_tmp, stride_K2, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc, block_table, block_size, sequence, ne11);
     }
     if (nbatch_K_last > 0) {
         constexpr int k_KQ_0 = DKQ - nbatch_K_last;
         flash_attn_tile_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, use_logit_softcap, oob_check>(
-            Q_tmp, K_h2, KV_tmp, stride_K2, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc, block_table, block_size, sequence, ne01.x);
+            Q_tmp, K_h2, KV_tmp, stride_K2, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc, block_table, block_size, sequence, ne11);
     }
 
     // Apply logit softcap + mask, update KQ_max:
@@ -728,7 +729,7 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
 #pragma unroll
     for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
         flash_attn_tile_load_tile<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
-            (V_h2, KV_tmp, stride_V2, k_VKQ_sup - k0, block_table, k_VKQ_0 + k0, block_size, sequence, ne01.x);
+            (V_h2, KV_tmp, stride_V2, k_VKQ_sup - k0, block_table, k_VKQ_0 + k0, block_size, sequence, ne11);
         __syncthreads();
 
 #ifdef FAST_FP16_AVAILABLE
@@ -976,14 +977,14 @@ static __global__ void flash_attn_tile(
             constexpr bool oob_check = false;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence, ne11);
             k_VKQ_0 += gridDim.y*nbatch_fa;
         }
         if (k_VKQ_0 < k_VKQ_max) {
             constexpr bool oob_check = true;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence, ne11);
         }
     } else {
         // Branch without out-of-bounds checks.
@@ -991,7 +992,7 @@ static __global__ void flash_attn_tile(
             constexpr bool oob_check = false;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0, block_table, block_size, sequence, ne11);
         }
     }
 
