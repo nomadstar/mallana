@@ -373,7 +373,8 @@ static constexpr __device__ int ggml_cuda_fattn_tile_get_nbatch_K(const int DKQ,
 // TODO: deduplicate with mma-f16
 template<int warp_size, int nwarps, int I, int J, int J_padding, bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_load_tile(
-        const half2 * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int stride_KV, const int i_sup) {
+        const half2 * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int stride_KV, const int i_sup,
+        const char * block_table, const int k_VKQ_0, const int block_size, const int sequence, const int ne11) {
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
@@ -402,9 +403,10 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile(
                     const int j = j0*cpy_ne + (stride_j == warp_size ? threadIdx.x : threadIdx.x % stride_j)*cpy_ne;
 
                     const __align__(16) half2 zero[cpy_ne] = {{0.0f, 0.0f}};
+                    int64_t physical_i = get_physical_token_idx(block_table, k_VKQ_0 + i, block_size, sequence, ne11);
                     ggml_cuda_memcpy_1<cpy_nb>(
                         tile_KV + i*(J/2 + J_padding) + j,
-                        !oob_check || i < i_sup ? KV + i*stride_KV + j : zero);
+                        !oob_check || i < i_sup ? KV + physical_i*stride_KV + j : zero);
                 }
             }
         }
@@ -452,16 +454,7 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile(
                 for (int j0 = j0_start; j0 < j0_stop; j0 += stride_j) {
                     const int j = j0*(cpy_ne/2) + (stride_j == warp_size ? threadIdx.x : threadIdx.x % stride_j)*(cpy_ne/2);
 
-                    int64_t physical_i = i + k_VKQ_0;
-                    if (block_table && (!oob_check || i < i_sup)) {
-                        const int32_t * bt = (const int32_t *) block_table;
-                        const int max_blocks = (ne11 + block_size - 1) / block_size;
-                        const int logical_idx = k_VKQ_0 + i;
-                        const int physical_block = bt[sequence * max_blocks + logical_idx / block_size];
-                        physical_i = (physical_block >= 0) ? physical_block * block_size + (logical_idx % block_size) : logical_idx;
-                    } else if (!block_table) {
-                        physical_i = k_VKQ_0 + i;
-                    }
+                    int64_t physical_i = get_physical_token_idx(block_table, k_VKQ_0 + i, block_size, sequence, ne11);
 
                     const half2 zero[cpy_ne/2] = {{0.0f, 0.0f}};
                     __align__(16) half2 tmp_h2[cpy_ne/2];
