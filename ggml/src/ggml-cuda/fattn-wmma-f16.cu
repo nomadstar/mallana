@@ -53,6 +53,7 @@ static __global__ void flash_attn_ext_f16(
     const char * GGML_CUDA_RESTRICT V        = V_ptr;
     const char * GGML_CUDA_RESTRICT mask     = mask_ptr;
     const char * GGML_CUDA_RESTRICT block_table = block_table_ptr;
+    GGML_UNUSED(block_table);
     const char * GGML_CUDA_RESTRICT sinks    = sinks_ptr;
     const int  * GGML_CUDA_RESTRICT KV_max   = KV_max_ptr;
     float      * GGML_CUDA_RESTRICT dst      = dst_ptr;
