@@ -3991,7 +3991,13 @@ int32_t llama_triattention_init(
     cfg.disable_trig     = disable_trig;
     cfg.enable_logging   = enable_logging;
 
-    kv->init_triattention(stats_path, &cfg);
+    const auto & hparams  = ctx->get_model().hparams;
+    const uint32_t kv_size   = kv->get_size();
+    const double   rope_theta = (double)hparams.rope_freq_base_train;
+    const uint32_t head_dim   = hparams.n_embd_head_k();
+    const uint32_t n_kv_heads = hparams.n_head_kv();
+
+    kv->init_triattention(stats_path, &cfg, kv_size, rope_theta, head_dim, n_kv_heads);
     return kv->tri_has() ? 0 : -1;
 }
 
