@@ -72,3 +72,4 @@ done
 
 echo "Listo."
 ls -lh *bench*.txt *results*.txt *backend*.txt 2>/dev/null
+zip results.zip *bench*.txt *results*.txt *backend*.txt
