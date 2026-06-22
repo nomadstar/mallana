@@ -173,8 +173,20 @@ Based on [arXiv:2604.04921](https://arxiv.org/abs/2604.04921). Scores token impo
 
 **Step 1 — generate calibration file** (one-time per model, any coherent text up to ~32K tokens works):
 
+Requires Python dependencies: `pip install torch transformers numpy accelerate datasets`
+
+You can use any standard text as a corpus. For example, to use Wikitext-2:
 ```bash
-llama-cli -m model.gguf --triattention-calibrate corpus.txt --triattention-calibrate-out model.triattention
+wget https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-raw-v1.zip
+unzip wikitext-2-raw-v1.zip && mv wikitext-2-raw/wiki.test.raw corpus.txt
+```
+
+```bash
+python3 scripts/calibrate-triattention.py \
+    --model <hf-repo-id> \
+    --corpus corpus.txt \
+    --output model.triattention \
+    --device cuda
 ```
 
 **Step 2 — run with eviction:**
