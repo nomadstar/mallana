@@ -29,7 +29,7 @@ LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama
 
     // Extract params
     const uint32_t n_ctx    = ctx->n_ctx();
-    const uint32_t block_sz = paged_kv->block_size;
+    const uint32_t block_sz = paged_kv->get_block_size();
     const uint32_t n_batch  = ctx->n_batch();
     GGML_ASSERT(n_batch == ctx->n_ubatch() && "kv_paged requires n_batch == n_ubatch.");
 

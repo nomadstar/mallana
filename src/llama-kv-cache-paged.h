@@ -84,6 +84,8 @@ class llama_kv_cache_paged : public llama_memory_i {
     void set_seq_min_pos(llama_seq_id seq_id, llama_pos new_min);
     void set_seq_max_pos(llama_seq_id seq_id, llama_pos new_max);
 
+    uint32_t get_block_size() const { return block_size; }
+
   private:
     void concat_block_ids(llama_block_ids & to_block_table, const llama_block_ids & from_block_table);
     void do_block_copy(const llama_block_ids & src_ids, const llama_block_ids & new_ids, bool to_gpu);
