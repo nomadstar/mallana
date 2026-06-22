@@ -1365,6 +1365,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    // Notify memory context that graph compute finished (e.g. TriAttention pruning)
+    if (mctx) {
+        mctx->post_graph();
+    }
+
     ret = GGML_STATUS_SUCCESS;
 
     return res;

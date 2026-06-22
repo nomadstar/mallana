@@ -4,6 +4,7 @@
 #include "llama-io.h"
 #include "llama-model.h"
 #include "llama-context.h"
+#include "llama-triattention.h"
 
 #include <algorithm>
 #include <cassert>
@@ -609,6 +610,26 @@ llama_kv_cache::llama_kv_cache(
 // PagedAttention / Block Allocator
 //
 
+void llama_kv_cache::init_triattention(
+        const char               * stats_path,
+        const triattention_config * cfg,
+        uint32_t                   kv_size,
+        double                     rope_theta,
+        uint32_t                   head_dim,
+        uint32_t                   n_kv_heads) {
+    if (tri_state) {
+        LLAMA_LOG_WARN("%s: TriAttention already initialized, ignoring\n", __func__);
+        return;
+    }
+    tri_state = triattention_init(stats_path, cfg, kv_size, rope_theta, head_dim, n_kv_heads);
+    if (!tri_state) {
+        LLAMA_LOG_WARN("%s: failed to initialize TriAttention from '%s'\n", __func__, stats_path ? stats_path : "(null)");
+    } else {
+        LLAMA_LOG_INFO("%s: TriAttention initialized from '%s' (budget=%u, divide_length=%u)\n",
+            __func__, stats_path, cfg->budget, cfg->divide_length);
+    }
+}
+
 void llama_kv_cache::block_allocator_init(uint32_t total_tokens, uint32_t block_size) {
     if (pa_block_size > 0) {
         return; // already initialized
@@ -663,6 +684,9 @@ void llama_kv_cache::clear(bool data) {
         v_cells[s].reset();
         v_heads[s] = 0;
     }
+
+    // TriAttention: reset position tracking
+    triattention_on_reset(tri_state);
 
     // PagedAttention: reset block allocator state
     pa_block_tables.clear();
@@ -726,6 +750,8 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
                 if (new_head == cells.size()) {
                     new_head = i;
                 }
+                // Cell became empty — notify TriAttention
+                triattention_on_cell_removed(tri_state, i);
             }
         }
 
@@ -746,6 +772,7 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
                     continue;
                 }
 
+                triattention_on_cell_removed(tri_state, i);
                 cells.rm(i);
 
                 if (new_head == cells.size()) {
@@ -922,6 +949,9 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
 
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
     GGML_ASSERT(hparams.n_pos_per_embd() == 1 && "seq_add() is only supported for n_pos_per_embd() == 1");
+
+    // Notify TriAttention before modifying cell positions
+    triattention_on_position_shift(tri_state, shift, p0, p1);
 
     auto & cells = v_cells[seq_to_stream[seq_id]];
     auto & head  = v_heads[seq_to_stream[seq_id]];
@@ -1472,6 +1502,7 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 
                 seq_pos_max_rm[seq_id] = std::max(seq_pos_max_rm[seq_id], pos);
 
+                triattention_on_cell_removed(tri_state, idx);
                 cells.rm(idx);
             }
 
@@ -1488,6 +1519,8 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
             for (int32_t s = 0; s < ubatch.n_seq_id[i]; s++) {
                 cells.seq_add(idx, ubatch.seq_id[i][s]);
             }
+
+            triattention_on_token_added(tri_state, idx, ubatch.pos[i]);
         }
     }
 
@@ -2901,6 +2934,76 @@ llama_kv_cache_context::llama_kv_cache_context(
     for (uint32_t s = 0; s < n_stream; ++s) {
         sinfos[0].strm.push_back(s);
         sinfos[0].idxs[s].resize(1, 0);
+    }
+}
+
+void llama_kv_cache::triattention_try_prune() {
+    if (!tri_state) return;
+
+    const uint32_t kv_size = tri_state->kv_size;
+
+    // Count occupied cells
+    uint32_t n_used = 0;
+    for (uint32_t i = 0; i < kv_size; i++) {
+        if (tri_state->cell_positions[i] >= 0) n_used++;
+    }
+
+    // Early exit if trigger conditions not met
+    if (!triattention_should_prune(tri_state, n_used)) return;
+
+    // Build k_tensors array and layer_map from internal layers
+    const uint32_t n_layers = (uint32_t)layers.size();
+    std::vector<ggml_tensor *> k_tensors(n_layers);
+    std::vector<int32_t> layer_map(n_layers);
+    for (uint32_t i = 0; i < n_layers; i++) {
+        k_tensors[i] = layers[i].k;
+        layer_map[i] = (int32_t)layers[i].il;
+    }
+
+    const int32_t n_evicted = triattention_prune_impl(
+        tri_state,
+        k_tensors.data(),
+        n_layers,
+        layer_map.data(),
+        kv_size);
+
+    if (n_evicted <= 0) return;
+
+    // Remove evicted cells from the KV cache
+    // triattention_prune_impl sets cell_positions[i] = -1 for evicted cells
+    for (uint32_t s = 0; s < n_stream; s++) {
+        auto & cells = v_cells[s];
+        for (uint32_t i = 0; i < cells.size(); i++) {
+            if (!cells.is_empty(i) && tri_state->cell_positions[i] < 0) {
+                cells.rm(i);
+            }
+        }
+    }
+
+    // PagedAttention: free blocks for evicted cells
+    if (pa_block_size > 0) {
+        // Build a set of freed cells per stream, then walk block tables
+        // For each seq that has a block table, count how many of its blocks
+        // correspond to cells that were evicted. We free the entire block
+        // when all its cells are evicted (conservative: free any block that
+        // had at least one evicted cell).
+        // For simplicity, free all block tables and re-allocate on demand.
+        // This is correct but not optimal — we could track per-block usage.
+        for (auto & [sid, table] : pa_block_tables) {
+            for (uint32_t bid : table) {
+                block_free(bid);
+            }
+        }
+        pa_block_tables.clear();
+    }
+
+    LLAMA_LOG_DEBUG("%s: TriAttention evicted %d tokens, %u cells remaining\n",
+        __func__, n_evicted, n_used - (uint32_t)n_evicted);
+}
+
+void llama_kv_cache_context::post_graph() {
+    if (kv) {
+        kv->triattention_try_prune();
     }
 }
 

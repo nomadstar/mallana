@@ -9,6 +9,8 @@
 #include <vector>
 
 struct llama_cparams;
+struct triattention_state;
+struct triattention_config;
 struct llama_hparams;
 struct llama_model;
 struct llama_context;
@@ -245,6 +247,30 @@ public:
 
     uint32_t get_block_size() const { return pa_block_size; }
 
+    //
+    // TriAttention / Pruning API
+    //
+
+    // Initialize TriAttention with a calibration file and config.
+    // Caller retains ownership of cfg. No-op if tri_state is already initialized.
+    void init_triattention(
+            const char               * stats_path,
+            const triattention_config * cfg,
+            uint32_t                   kv_size,
+            double                     rope_theta,
+            uint32_t                   head_dim,
+            uint32_t                   n_kv_heads);
+
+    // True if TriAttention is active.
+    bool tri_has() const { return tri_state != nullptr; }
+
+    // Get the TriAttention state (for stats/logging, read-only).
+    const triattention_state * get_tri_state() const { return tri_state; }
+
+    // Try to prune the KV cache with TriAttention. Called after graph compute.
+    // Updates pa_block_tables if paged mode is active.
+    void triattention_try_prune();
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
@@ -327,6 +353,9 @@ private:
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
+
+    // TriAttention runtime state (nullptr = disabled)
+    triattention_state * tri_state = nullptr;
 
     size_t total_size() const;
 
@@ -417,6 +446,8 @@ public:
     ggml_tensor * get_turbo_rotation_inv() const;
 
     // Override virtual methods from llama_memory_context_i
+    void post_graph() override;
+
     ggml_tensor * get_turbo_rot_forward() const override;
     ggml_tensor * get_turbo_rot_inverse() const override;
 
