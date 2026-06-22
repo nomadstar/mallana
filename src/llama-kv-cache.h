@@ -223,6 +223,28 @@ public:
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
 
+    //
+    // PagedAttention / Block Allocator API
+    //
+
+    // Initialize the block pool with total_tokens / block_size blocks.
+    // Enables paged mode. No-op if already initialized.
+    void block_allocator_init(uint32_t total_tokens, uint32_t block_size);
+
+    // Allocate a free block. Returns block ID, or -1 if OOM.
+    int32_t block_allocate();
+
+    // Free a previously allocated block back to the pool.
+    void block_free(uint32_t block_id);
+
+    // Get the block table for a sequence (allocates empty table if new).
+    const std::vector<uint32_t> & get_block_table(llama_seq_id seq_id);
+
+    // True if block allocator has been initialized (paged mode active).
+    bool is_paged() const { return pa_block_size > 0; }
+
+    uint32_t get_block_size() const { return pa_block_size; }
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
@@ -296,6 +318,12 @@ private:
 
     // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization (128 floats)
     ggml_tensor * turbo_innerq_scale_inv = nullptr;
+
+    // PagedAttention / Block Allocator state
+    uint32_t pa_block_size = 0;          // tokens per block, 0 = disabled
+    uint32_t pa_total_blocks = 0;        // total blocks in pool
+    std::vector<uint32_t> pa_free_blocks;                    // freelist
+    std::unordered_map<llama_seq_id, std::vector<uint32_t>> pa_block_tables; // per-seq
 
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;

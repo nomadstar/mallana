@@ -605,10 +605,73 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 }
 
+//
+// PagedAttention / Block Allocator
+//
+
+void llama_kv_cache::block_allocator_init(uint32_t total_tokens, uint32_t block_size) {
+    if (pa_block_size > 0) {
+        return; // already initialized
+    }
+    GGML_ASSERT(block_size > 0 && "block size must be > 0");
+    GGML_ASSERT(total_tokens % block_size == 0 && "total_tokens must be divisible by block_size");
+
+    pa_block_size = block_size;
+    pa_total_blocks = total_tokens / block_size;
+    pa_free_blocks.clear();
+    pa_free_blocks.reserve(pa_total_blocks);
+
+    // Populate freelist in reverse so allocate() returns low-to-high
+    for (uint32_t i = 0; i < pa_total_blocks; ++i) {
+        pa_free_blocks.push_back(i);
+    }
+
+    pa_block_tables.clear();
+
+    LLAMA_LOG_INFO("%s: PagedAttention initialized: %u blocks x %u tokens = %u total\n",
+        __func__, pa_total_blocks, pa_block_size, total_tokens);
+}
+
+int32_t llama_kv_cache::block_allocate() {
+    if (pa_free_blocks.empty()) {
+        LLAMA_LOG_ERROR("%s: out of paged memory (all %u blocks allocated)\n",
+            __func__, pa_total_blocks);
+        return -1;
+    }
+    const uint32_t block_id = pa_free_blocks.back();
+    pa_free_blocks.pop_back();
+    return (int32_t)block_id;
+}
+
+void llama_kv_cache::block_free(uint32_t block_id) {
+    GGML_ASSERT(block_id < pa_total_blocks && "block_id out of range");
+    pa_free_blocks.push_back(block_id);
+}
+
+const std::vector<uint32_t> & llama_kv_cache::get_block_table(llama_seq_id seq_id) {
+    auto it = pa_block_tables.find(seq_id);
+    if (it != pa_block_tables.end()) {
+        return it->second;
+    }
+    // Insert empty table for new sequence
+    auto result = pa_block_tables.emplace(seq_id, std::vector<uint32_t>());
+    return result.first->second;
+}
+
 void llama_kv_cache::clear(bool data) {
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
+    }
+
+    // PagedAttention: reset block allocator state
+    pa_block_tables.clear();
+    pa_free_blocks.clear();
+    if (pa_block_size > 0) {
+        pa_free_blocks.reserve(pa_total_blocks);
+        for (uint32_t i = 0; i < pa_total_blocks; ++i) {
+            pa_free_blocks.push_back(i);
+        }
     }
 
     if (data) {
@@ -694,6 +757,27 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
             if (new_head != cells.size() && new_head < head) {
                 head = new_head;
             }
+        }
+    }
+
+    // PagedAttention: free blocks owned by the removed sequence
+    if (pa_block_size > 0) {
+        if (seq_id >= 0) {
+            auto it = pa_block_tables.find(seq_id);
+            if (it != pa_block_tables.end()) {
+                for (uint32_t bid : it->second) {
+                    block_free(bid);
+                }
+                pa_block_tables.erase(it);
+            }
+        } else {
+            // seq_id == -1: free ALL block tables
+            for (auto & [sid, table] : pa_block_tables) {
+                for (uint32_t bid : table) {
+                    block_free(bid);
+                }
+            }
+            pa_block_tables.clear();
         }
     }
 
@@ -787,9 +871,20 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
 
     v_heads[s1] = v_heads[s0];
 
-    //for (uint32_t s = 0; s < n_stream; ++s) {
-    //    LLAMA_LOG_WARN("%s: seq %d: min = %d, max = %d\n", __func__, s, v_cells[s].seq_pos_min(s), v_cells[s].seq_pos_max(s));
-    //}
+    // PagedAttention: copy block table to destination sequence
+    if (pa_block_size > 0) {
+        auto it_src = pa_block_tables.find(seq_id_src);
+        if (it_src != pa_block_tables.end()) {
+            auto it_dst = pa_block_tables.find(seq_id_dst);
+            if (it_dst != pa_block_tables.end()) {
+                // Free any existing blocks held by dst
+                for (uint32_t bid : it_dst->second) {
+                    block_free(bid);
+                }
+            }
+            pa_block_tables[seq_id_dst] = it_src->second;
+        }
+    }
 }
 
 void llama_kv_cache::seq_keep(llama_seq_id seq_id) {

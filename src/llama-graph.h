@@ -333,6 +333,9 @@ public:
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
 
+    // PagedAttention block table
+    ggml_tensor * block_table = nullptr; // I32 [n_kv / block_size]
+
     // note: these have to be copies because in order to be able to reuse a graph, its inputs
     //       need to carry these parameters with them. otherwise, they can point to freed
     //       llm_graph_params from a previous batch, causing stack-use-after-return
@@ -368,6 +371,9 @@ public:
 
     ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
+
+    // PagedAttention block table
+    ggml_tensor * block_table = nullptr; // I32 [n_kv / block_size]
 
     const llama_hparams hparams;
     const llama_cparams cparams;
@@ -452,6 +458,9 @@ public:
 
     ggml_tensor * self_k_rot_swa = nullptr;
     ggml_tensor * self_v_rot_swa = nullptr;
+
+    // PagedAttention block table
+    ggml_tensor * block_table = nullptr; // I32 [n_kv / block_size]
 
     const llama_hparams hparams;
     const llama_cparams cparams;
@@ -968,7 +977,9 @@ struct llm_graph_context {
             ggml_tensor * sinks,   // [n_head_q]
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * block_table = nullptr, // I32 [n_kv / block_size]
+              uint32_t   block_size = 0) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

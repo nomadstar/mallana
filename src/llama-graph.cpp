@@ -2059,7 +2059,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
          ggml_tensor * v_mla,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+         ggml_tensor * block_table,
+           uint32_t   block_size) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
