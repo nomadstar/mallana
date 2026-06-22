@@ -2130,15 +2130,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
-        if (turbo_rot_inv) {
-            ggml_set_input(turbo_rot_inv);
-            if (cur->type != GGML_TYPE_F32) {
-                cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
-            }
-            cur = ggml_mul_mat_aux(ctx0, cur, turbo_rot_inv);
-            cb(cur, "fattn_wht_inv", il);
-        }
-
         if (v_mla) {
 #if 0
             // v_mla can be applied as a matrix-vector multiplication with broadcasting across dimension 3 == n_tokens.
@@ -2204,12 +2195,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_mul_mat_aux(ctx0, v, kq);
         cb(cur, "kqv", il);
-
-        if (turbo_rot_inv) {
-            ggml_set_input(turbo_rot_inv);
-            cur = ggml_mul_mat_aux(ctx0, cur, turbo_rot_inv);
-            cb(cur, "kqv_wht_inv", il);
-        }
 
         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA
         if (v_mla) {
@@ -2381,10 +2366,10 @@ ggml_tensor * llm_graph_context::build_attn(
             q_cur = ggml_mul(ctx0, q_cur, turbo_innerq_scale_inv);
         }
 
-        ggml_tensor * turbo_rot_fwd = mctx_cur->get_turbo_rot_forward();
-        if (turbo_rot_fwd) {
-            ggml_set_input(turbo_rot_fwd);
-            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_fwd);
+        ggml_tensor * turbo_rot_inv = mctx_cur->get_turbo_rot_inverse();
+        if (turbo_rot_inv) {
+            ggml_set_input(turbo_rot_inv);
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_inv);
         }
     }
 
@@ -2495,10 +2480,10 @@ ggml_tensor * llm_graph_context::build_attn(
             q_cur = ggml_mul(ctx0, q_cur, turbo_innerq_scale_inv);
         }
 
-        ggml_tensor * turbo_rot_fwd = mctx_cur->get_turbo_rot_forward();
-        if (turbo_rot_fwd) {
-            ggml_set_input(turbo_rot_fwd);
-            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_fwd);
+        ggml_tensor * turbo_rot_inv = mctx_cur->get_turbo_rot_inverse();
+        if (turbo_rot_inv) {
+            ggml_set_input(turbo_rot_inv);
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_inv);
         }
     }
 
@@ -2569,10 +2554,10 @@ ggml_tensor * llm_graph_context::build_attn(
             q_cur = ggml_mul(ctx0, q_cur, turbo_innerq_scale_inv);
         }
 
-        ggml_tensor * turbo_rot_fwd = mctx_cur->get_turbo_rot_forward();
-        if (turbo_rot_fwd) {
-            ggml_set_input(turbo_rot_fwd);
-            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_fwd);
+        ggml_tensor * turbo_rot_inv = mctx_cur->get_turbo_rot_inverse();
+        if (turbo_rot_inv) {
+            ggml_set_input(turbo_rot_inv);
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_inv);
         }
     }
 
@@ -2677,10 +2662,10 @@ ggml_tensor * llm_graph_context::build_attn(
             q_cur = ggml_mul(ctx0, q_cur, turbo_innerq_scale_inv);
         }
 
-        ggml_tensor * turbo_rot_fwd = mctx_cur->get_turbo_rot_forward();
-        if (turbo_rot_fwd) {
-            ggml_set_input(turbo_rot_fwd);
-            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_fwd);
+        ggml_tensor * turbo_rot_inv = mctx_cur->get_turbo_rot_inverse();
+        if (turbo_rot_inv) {
+            ggml_set_input(turbo_rot_inv);
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_inv);
         }
     }
 

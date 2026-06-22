@@ -511,6 +511,90 @@ static __global__ void flash_attn_ext_vec(
         }
 #endif // V_DOT2_F32_F16_AVAILABLE
 
+        // Cooperative inverse WHT rotation for turbo V types:
+        // VKQ accumulated in WHT domain (R·v), transform back to original domain (v)
+        // R^{-1}(x) = S1 · FWHT(S2 · x) / sqrt(128)
+        if constexpr (D == 128 && (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO4_0)) {
+            for (int v = 0; v < V_cols_per_iter; ++v) {
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                half * section_h = (half *)KQ + threadIdx.y * V_cols_per_iter * D + v * D;
+                const int base = threadIdx.x * 4;
+                float val[4];
+                for (int off = 0; off < 4; ++off) {
+                    val[off] = __half2float(section_h[base + off]);
+                }
+                for (int off = 0; off < 4; ++off) {
+                    val[off] *= TURBO_WHT_SIGNS2[base + off];
+                }
+#else
+                float * section_f = (float *)KQ + threadIdx.y * V_cols_per_iter * D + v * D;
+                const int base = threadIdx.x * 4;
+                float val[4];
+                val[0] = section_f[base + 0] * TURBO_WHT_SIGNS2[base + 0];
+                val[1] = section_f[base + 1] * TURBO_WHT_SIGNS2[base + 1];
+                val[2] = section_f[base + 2] * TURBO_WHT_SIGNS2[base + 2];
+                val[3] = section_f[base + 3] * TURBO_WHT_SIGNS2[base + 3];
+#endif
+                // stride=1: local butterfly within 4-element chunk
+                { float t0 = val[0], t1 = val[1]; val[0] = t0 + t1; val[1] = t0 - t1; }
+                { float t0 = val[2], t1 = val[3]; val[2] = t0 + t1; val[3] = t0 - t1; }
+                // stride=2: local butterfly within 4-element chunk
+                { float t0 = val[0], t1 = val[2]; val[0] = t0 + t1; val[2] = t0 - t1; }
+                { float t0 = val[1], t1 = val[3]; val[1] = t0 + t1; val[3] = t0 - t1; }
+                // stride=4,8,16,32,64: cross-thread butterfly via __shfl_xor_sync
+                for (int s = 4; s <= 64; s <<= 1) {
+                    int xor_lane = s / 4;
+                    float other[4];
+                    for (int off = 0; off < 4; ++off) {
+                        other[off] = __shfl_xor_sync(0xFFFFFFFF, val[off], xor_lane);
+                    }
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                    half * sh = section_h;
+                    for (int off = 0; off < 4; ++off) {
+                        int idx = base + off;
+                        if ((idx & s) == 0) {
+                            sh[idx]     = __float2half(val[off] + other[off]);
+                            sh[idx ^ s] = __float2half(val[off] - other[off]);
+                        }
+                    }
+                    __syncthreads();
+                    for (int off = 0; off < 4; ++off) {
+                        val[off] = __half2float(sh[base + off]);
+                    }
+#else
+                    float * sf = section_f;
+                    for (int off = 0; off < 4; ++off) {
+                        int idx = base + off;
+                        if ((idx & s) == 0) {
+                            sf[idx]     = val[off] + other[off];
+                            sf[idx ^ s] = val[off] - other[off];
+                        }
+                    }
+                    __syncthreads();
+                    for (int off = 0; off < 4; ++off) {
+                        val[off] = sf[base + off];
+                    }
+#endif
+                }
+                // S1 signs and scale by 1/sqrt(128)
+                constexpr float inv_sqrt_128 = 0.08838834764831845f;
+                for (int off = 0; off < 4; ++off) {
+                    val[off] *= TURBO_WHT_SIGNS1[base + off] * inv_sqrt_128;
+                }
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                for (int off = 0; off < 4; ++off) {
+                    section_h[base + off] = __float2half(val[off]);
+                }
+#else
+                section_f[base + 0] = val[0];
+                section_f[base + 1] = val[1];
+                section_f[base + 2] = val[2];
+                section_f[base + 3] = val[3];
+#endif
+                __syncthreads();
+            }
+        }
+
         KQ_sum[j_VKQ] *= kqmax_scale;
         KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
         if (threadIdx.x == 0) {

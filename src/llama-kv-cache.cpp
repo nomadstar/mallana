@@ -413,11 +413,9 @@ llama_kv_cache::llama_kv_cache(
         turbo_innerq_scale_inv = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, rot_size);
         ggml_format_name(turbo_innerq_scale_inv, "turbo_innerq_scale_inv");
 
-        // keep the context alive with a CPU buffer
+        // allocate in a CPU buffer; do NOT mark as WEIGHTS so the data persists
+        // across ggml_set_input transfers on every inference step
         auto * turbo_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), ggml_backend_cpu_buffer_type());
-        if (turbo_buf) {
-            ggml_backend_buffer_set_usage(turbo_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-        }
 
         if (turbo_rotation && rot_data_fwd) {
             ggml_backend_tensor_set(turbo_rotation, rot_data_fwd, 0, rot_size*rot_size*sizeof(float));
