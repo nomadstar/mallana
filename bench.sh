@@ -17,7 +17,7 @@ cmake --build build-super --config Release --parallel 6
 ./build-super/bin/test-backend-ops  > supermerge_backend_ops.txt   2>&1 || true
 
 # ── Benchmarks por modelo ───────────────────────────────────────
-OLLAMA_MANIFESTS_DIR="$HOME/.ollama/models/manifests/registry.ollama.ai/library"
+OLLAMA_MANIFESTS_DIR="$HOME/.ollama/models/manifests"
 
 if [ ! -d "$OLLAMA_MANIFESTS_DIR" ]; then
     echo "No se encontró el directorio de manifiestos de Ollama."
