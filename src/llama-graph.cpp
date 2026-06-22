@@ -2614,7 +2614,20 @@ ggml_tensor * llm_graph_context::build_attn(
         }
     }
 
-    // these nodes are added to the graph together so that they are not reordered
+    // TurboQuant: rotate Q into the WHT domain and scale by innerq_scale_inv
+    if (inp->block_table) {
+        ggml_tensor * turbo_innerq_scale_inv = mctx_cur->get_turbo_innerq_scale_inv();
+        if (turbo_innerq_scale_inv) {
+            q_cur = ggml_mul(ctx0, q_cur, turbo_innerq_scale_inv);
+        }
+
+        ggml_tensor * turbo_rot_fwd = mctx_cur->get_turbo_rot_forward();
+        if (turbo_rot_fwd) {
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, turbo_rot_fwd);
+        }
+    }
+
+    // these nodes are added to the graph together so that they are not reorderedd
     // by doing so, the number of splits in the graph is reduced
     ggml_build_forward_expand(gf, q_cur);
 
