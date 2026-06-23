@@ -58,23 +58,26 @@ def parse_args():
     p.add_argument("--n-samples",   type=int, default=512,  help="Number of random windows to process")
     p.add_argument("--sample-heads",type=int, default=0,    help="Attention heads to sample (0 = all)")
     p.add_argument("--max-seq-len", type=int, default=2048, help="Token window length per sample")
-    p.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--vram-gb",     type=int, default=3,    help="Max VRAM to use (GiB)")
+    p.add_argument("--ram-gb",      type=int, default=20,   help="Max CPU RAM to use (GiB)")
     p.add_argument("--dtype",       default="bfloat16", choices=["float32", "bfloat16"])
     p.add_argument("--seed",        type=int, default=42)
     return p.parse_args()
 
 
-def load_model_and_tokenizer(model_id, device, dtype_str):
+def load_model_and_tokenizer(model_id, dtype_str, vram_gb=3, ram_gb=20):
     from transformers import AutoTokenizer, AutoModelForCausalLM
     print(f"[calibrate] Loading tokenizer from {model_id} …")
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
     torch_dtype = torch.bfloat16 if dtype_str == "bfloat16" else torch.float32
-    print(f"[calibrate] Loading model ({dtype_str}) …")
+    max_memory  = {0: f"{vram_gb}GiB", "cpu": f"{ram_gb}GiB"}
+    print(f"[calibrate] Loading model ({dtype_str}, VRAM≤{vram_gb}GiB, RAM≤{ram_gb}GiB) …")
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        dtype=torch_dtype,
-        device_map=device,
+        torch_dtype=torch_dtype,
+        device_map="auto",
+        max_memory=max_memory,
         trust_remote_code=True,
     )
     model.eval()
@@ -144,16 +147,16 @@ def collect_q_activations(model, tok, corpus_text, cfg, args):
     storage = {}  # layer_idx -> list of tensors captured this forward pass
 
     def make_hook(layer_idx):
-        def hook(module, inp, output):
-            # inp[0] is the hidden state entering the attention module;
-            # we want Q *before* RoPE, so we project it ourselves using the
-            # same weight the attention layer uses.
-            # Works for LlamaAttention and most GPT-NeoX-style models.
-            hidden = inp[0]                      # [1, seq, hidden]
-            attn   = module
+        def hook(module, args, kwargs):
+            # Modern transformers passes hidden_states as kwarg; older as args[0].
+            if args:
+                hidden = args[0]
+            elif "hidden_states" in kwargs:
+                hidden = kwargs["hidden_states"]
+            else:
+                return
 
-            # Resolve Q projection weight (try common attribute names)
-            q_proj = getattr(attn, "q_proj", None)
+            q_proj = getattr(module, "q_proj", None)
             if q_proj is None:
                 return
 
@@ -164,7 +167,7 @@ def collect_q_activations(model, tok, corpus_text, cfg, args):
             hd = cfg["head_dim"]
             nh = cfg["num_attn_heads"]
             q  = q.view(batch, seq, nh, hd).squeeze(0)  # [seq, n_heads, head_dim]
-            storage[layer_idx] = q.cpu().float().numpy()  # [seq, n_heads, head_dim]
+            storage[layer_idx] = q.cpu().float().numpy()
 
         return hook
 
@@ -189,15 +192,15 @@ def collect_q_activations(model, tok, corpus_text, cfg, args):
         )
 
     for layer_idx, module in attn_modules.items():
-        h = module.register_forward_hook(make_hook(layer_idx))
+        h = module.register_forward_pre_hook(make_hook(layer_idx), with_kwargs=True)
         hooks.append(h)
 
-    device = next(model.parameters()).device
+    input_device = next(model.parameters()).device
 
     try:
         for s in range(args.n_samples):
             start = int(rng.integers(0, n_tokens - max_seq_len + 1))
-            window = tokens[start:start + max_seq_len].unsqueeze(0).to(device)
+            window = tokens[start:start + max_seq_len].unsqueeze(0).to(input_device)
 
             storage.clear()
             with torch.no_grad():
@@ -313,7 +316,7 @@ def main():
         print("ERROR: corpus file is empty.", file=sys.stderr)
         sys.exit(1)
 
-    tok, model = load_model_and_tokenizer(args.model, args.device, args.dtype)
+    tok, model = load_model_and_tokenizer(args.model, args.dtype, args.vram_gb, args.ram_gb)
     cfg = get_model_config(model)
 
     print(f"[calibrate] Model: layers={cfg['num_layers']}, "
