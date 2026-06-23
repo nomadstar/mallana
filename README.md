@@ -14,6 +14,8 @@ A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) targeting 
 | **TriAttention** | Active | CLI flags wired. Requires a per-model `.triattention` calibration file (see usage below). |
 | **PagedAttention** | Pending | Block allocator stub exists, not connected to the inference graph. |
 
+> **Hardware note:** TurboQuant+ KV compression shows meaningful throughput gains at long context (≥16k tokens) on GPUs with ≥16 GB VRAM. On smaller GPUs (≤8 GB), the KV cache fits in memory regardless of quantization at typical context lengths, so the improvement is negligible. The primary benefit is fitting larger models or longer contexts into a given VRAM budget.
+
 ### Lineage
 
 TurboQuant+ is inspired by Google's original **TurboQuant** paper (ICLR 2026), which introduced Walsh-Hadamard-rotated polar codebook quantization for KV cache and demonstrated 4.6x compression at ~1% PPL loss. This project extends that foundation substantially -- adding the asymmetric K/V policy (V is free, K is everything), layer-aware Boundary V protection, attention-gated sparse V dequantization, the `TQ3_1S` / `TQ4_1S` weight quantization formats, the `turbo2` / `turbo4` tier variants, and cross-backend kernel coverage (CUDA `dp4a`, HIP/ROCm RDNA/CDNA, Vulkan coopmat, Metal TurboFlash + V2.1 fused kernels).
@@ -186,7 +188,8 @@ python3 scripts/calibrate-triattention.py \
     --model <hf-repo-id> \
     --corpus corpus.txt \
     --output model.triattention \
-    --device cuda
+    --vram-gb 3 \
+    --ram-gb 20
 ```
 
 **Step 2 — run with eviction:**
