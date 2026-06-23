@@ -1188,6 +1188,24 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
     if (!pg_enabled) return;
     const uint32_t n_pages_per_stream = (uint32_t) pg_page_table[0].size();
+    // [DIAG-ALLOC] show allocations
+    {
+        static int s_alloc_call = 0;
+        fprintf(stderr, "[PGALLOC#%d] n_stream=%zu s0=%u s1=%u",
+                s_alloc_call++, sinfo.n_stream(), sinfo.s0, sinfo.s1);
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            const uint32_t strm = sinfo.strm[s];
+            fprintf(stderr, " strm[%u]=%u idxs[%u]={", s, strm, s);
+            uint32_t cnt = 0;
+            for (const uint32_t ci : sinfo.idxs[s]) {
+                if (cnt < 4) fprintf(stderr, "%u,", ci);
+                cnt++;
+            }
+            if (cnt > 4) fprintf(stderr, "...(%u total)", cnt);
+            fprintf(stderr, "}");
+        }
+        fprintf(stderr, " free_blocks=%zu\n", pg_free_blocks.size());
+    }
     for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
         const uint32_t strm = sinfo.strm[s];
         for (const uint32_t cell_idx : sinfo.idxs[s]) {
@@ -1199,6 +1217,18 @@ void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
                 pg_free_blocks.pop_back();
             }
         }
+    }
+    // [DIAG-ALLOC] show resulting page table
+    {
+        fprintf(stderr, "[PGALLOC-RESULT] pg_page_table: ");
+        for (uint32_t s = 0; s < (uint32_t)pg_page_table.size() && s < 3; ++s) {
+            fprintf(stderr, "strm%u=[", s);
+            for (uint32_t lp = 0; lp < (uint32_t)pg_page_table[s].size() && lp < 8; ++lp) {
+                fprintf(stderr, "%d,", pg_page_table[s][lp]);
+            }
+            fprintf(stderr, "] ");
+        }
+        fprintf(stderr, "\n");
     }
 }
 

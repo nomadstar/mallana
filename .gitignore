@@ -95,6 +95,10 @@
 # Server Web UI temporary files
 /tools/server/webui/node_modules
 /tools/server/webui/dist
+/tools/ui/node_modules
+/tools/ui/dist
+/tools/ui/build
+/tools/ui/.svelte-kit
 
 # Python
 
@@ -143,3 +147,11 @@ poetry.toml
 /.windsurf/
 # emscripten
 a.out.*
+
+# Generated test/bench logs
+/Results*.txt
+/bench-*.txt
+/corpus.txt
+/log_debug.txt
+/test.txt
+*.triattention
