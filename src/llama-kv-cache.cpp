@@ -1355,6 +1355,21 @@ void llama_kv_cache::set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, co
             tmp[s * n_lpage + lp] = (pblock >= 0) ? pblock : 0;
         }
     }
+    // [DIAG] Print what we're writing to the page table.
+    {
+        static int s_call = 0;
+        static bool s_first = true;
+        if (s_first) {
+            fprintf(stderr, "[PTSET#%d] ns=%u n_lpage=%u buf=%p data=%p ptable=[",
+                    s_call, ns, n_lpage, (void*)dst->buffer, dst->data);
+            for (uint32_t i = 0; i < nelems; ++i) {
+                fprintf(stderr, "%d%s", tmp[i], (i+1<nelems)?",":"");
+            }
+            fprintf(stderr, "]\n");
+            ++s_call;
+        }
+        s_first = !s_first;
+    }
     ggml_backend_tensor_set(dst, tmp.data(), 0, nelems * sizeof(int32_t));
     (void) n_kv;
 }

@@ -86,6 +86,26 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                                ptable_elems * sizeof(int32_t),
                                cudaMemcpyDefault, ctx.stream()));
 
+    // [DIAG2] Synchronous readback of ptable to verify actual kernel values.
+    {
+        static int  s_decode_call2 = 0;
+        static bool s_first_layer2 = true;
+        if (s_first_layer2) {
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+            std::vector<int32_t> h_verify(ptable_elems);
+            CUDA_CHECK(cudaMemcpy(h_verify.data(), ptable_buf.get(),
+                                  ptable_elems * sizeof(int32_t),
+                                  cudaMemcpyDeviceToHost));
+            fprintf(stderr, "[PGATHER2#%d] kernel_ptable=[", s_decode_call2);
+            for (int i = 0; i < ptable_elems; ++i) {
+                fprintf(stderr, "%d%s", h_verify[i], (i+1<ptable_elems)?",":"");
+            }
+            fprintf(stderr, "]\n");
+            ++s_decode_call2;
+        }
+        s_first_layer2 = !s_first_layer2;
+    }
+
     const int32_t n_rows    = n_kv * ns;
     const int32_t n_threads = (int32_t) std::min((int64_t)128, (row_bytes + 3) / 4);
 
