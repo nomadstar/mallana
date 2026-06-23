@@ -1,15 +1,25 @@
 # llama.cpp — TurboQuant + TriAttention
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![GitHub](https://img.shields.io/badge/github-atomicmilkshake%2Fllama--cpp--turboquant-blue?logo=github)](https://github.com/atomicmilkshake/llama-cpp-turboquant)
+[![GitHub](https://img.shields.io/badge/github-nomadstar%2Fllama--cpp--turboquant-blue?logo=github)](https://github.com/nomadstar/llama-cpp-turboquant)
 [![HuggingFace](https://img.shields.io/badge/🤗%20HuggingFace-binaries-yellow)](https://huggingface.co/atomicmilkshake/llama-cpp-turboquant-binaries)
 
-A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) with two major additions:
+[🇬🇧 English](#english) | [🇪🇸 Español](#español)
 
-- **TurboQuant** — custom low-bit quantization formats (turbo2, turbo3, turbo4) with hardware-optimised CUDA kernels for faster inference with smaller memory footprint
+---
+
+<a name="english"></a>
+## English
+
+A personal fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) combining three major additions:
+
+- **TurboQuant** — custom low-bit quantization formats (`turbo2`, `turbo3`, `turbo4`) with hardware-optimised CUDA kernels using Walsh-Hadamard Transform (WHT) polar coding for smaller memory footprint
 - **TriAttention** — GPU-accelerated KV cache pruning ([arXiv 2604.04921](https://arxiv.org/abs/2604.04921)) that scores token importance using RoPE-inverted key vectors and evicts low-value tokens, enabling long-context inference within a fixed memory budget
+- **PagedAttention** — block-table KV memory management ([arXiv 2309.06180](https://arxiv.org/abs/2309.06180)) — engine present, CLI flags pending
 
-## Pre-built Windows Binaries
+> **Hardware note:** TurboQuant+ KV compression shows meaningful throughput gains at long context (≥16k tokens) on GPUs with ≥16 GB VRAM. On smaller GPUs (≤8 GB), the KV cache fits in memory regardless of quantization at typical context lengths, so the improvement is negligible.
+
+### Pre-built Windows Binaries
 
 Download the latest Release build (Windows x64, CUDA 13, RTX 2000+) from Hugging Face:
 
@@ -17,13 +27,11 @@ Download the latest Release build (Windows x64, CUDA 13, RTX 2000+) from Hugging
 
 > Requires CUDA 13.x runtime (`cublasLt64_13.dll`). Install the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) or the CUDA runtime redistributable if you don't have it.
 
----
-
-## TriAttention
+### TriAttention
 
 TriAttention keeps your KV cache within a fixed token budget by periodically scoring all cached tokens and evicting the least important ones. Scoring uses the geometric structure of RoPE-encoded key vectors — no additional model weights or fine-tuning required.
 
-### Performance (Qwen3-8B Q4\_K\_M, RTX 3080, `-c 512`)
+#### Performance (Qwen3-8B Q4\_K\_M, RTX 3080, `-c 512`)
 
 | Mode | Prune overhead | Generation speed |
 |------|---------------|-----------------|
@@ -33,25 +41,27 @@ TriAttention keeps your KV cache within a fixed token budget by periodically sco
 
 GPU scoring is ~1,000× faster than CPU. The 4.3× generation speedup comes from keeping the KV cache within VRAM budget (no eviction stalls, consistent flash-attention batch sizes).
 
-### Quick start
+#### Quick start
 
 ```bash
-llama-server.exe -m YourModel.gguf -c 32768 -ngl 99 --port 8080 \
+llama-server -m YourModel.gguf -c 32768 -ngl 99 --port 8080 \
   --triattention-stats model.triattention \
   --triattention-budget 4096 \
   --triattention-window 256 \
   --triattention-log
 ```
 
-A `.triattention` calibration file is required. Generate one from a representative text corpus:
+A `.triattention` calibration file is required. Generate one from a HuggingFace model and a plain-text corpus:
 
 ```bash
-llama-cli.exe -m YourModel.gguf -ngl 99 \
-  --triattention-calibrate corpus.txt \
-  --triattention-calibrate-out model.triattention
+python3 scripts/calibrate-triattention.py \
+  --model Qwen/Qwen2.5-Coder-1.5B \
+  --corpus corpus.txt \
+  --output model.triattention \
+  --vram-gb 3 --ram-gb 20
 ```
 
-### CLI flags
+#### CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -62,7 +72,7 @@ llama-cli.exe -m YourModel.gguf -ngl 99 \
 | `--triattention-log` | off | Print a line for each prune event |
 | `--triattention-no-protect-prefill` | off | Allow evicting prompt (prefill) tokens |
 
-### How it works
+#### How it works
 
 1. When occupied KV cells exceed `budget + window` (SLACK mode), a prune is triggered
 2. The most recent `window` positions and all prefix/prompt tokens are protected
@@ -70,11 +80,9 @@ llama-cli.exe -m YourModel.gguf -ngl 99 \
 4. The top-`budget` tokens by importance score are kept; the rest are evicted
 5. Position gaps left by evicted tokens are harmless — RoPE handles non-contiguous positions natively
 
----
+### TurboQuant
 
-## TurboQuant
-
-TurboQuant provides three custom quantization formats that outperform standard GGUF quants at equivalent bit widths:
+TurboQuant provides three custom quantization formats that apply WHT-based rotation before quantization:
 
 | Format | Bits/weight | Notes |
 |--------|------------|-------|
@@ -82,62 +90,279 @@ TurboQuant provides three custom quantization formats that outperform standard G
 | `turbo3_0` | ~3.0 | Sub-byte with Hadamard pre-rotation |
 | `turbo2_0` | ~2.0 | Aggressive compression with WHT-space centroids |
 
-All formats have CUDA kernels optimised for Turing+ (SM75) and Ampere (SM80/86) architectures.
+All formats have CUDA kernels optimised for Turing+ (SM75) and Ampere (SM80/86) architectures. AMD GPUs are supported via HIP (`ggml_cuda_dp4a` portable path) for RDNA3/RDNA4/CDNA3/CDNA4.
 
----
+### Building from source
 
-## Building from source
-
-### Requirements
+#### Requirements
 
 - Windows 10/11 or Linux
-- CUDA Toolkit 12.x or 13.x
+- CUDA Toolkit 12.x or 13.x (or ROCm 5.x+ for AMD)
 - Visual Studio 2022+ with C++ workload (Windows) or GCC 11+ (Linux)
 - CMake 3.21+
+- ccache (recommended — `bench.sh` uses it to skip unchanged rebuilds)
 
-### Windows (CUDA)
+#### Linux — NVIDIA (CUDA)
+
+```bash
+cmake -B build -DGGML_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;120;121"
+cmake --build build --config Release --parallel $(nproc)
+```
+
+#### Linux — AMD (ROCm/HIP)
+
+```bash
+cmake -B build -DGGML_HIP=ON \
+  -DCMAKE_HIP_ARCHITECTURES="gfx1100"   # adjust to your GPU
+cmake --build build --config Release --parallel $(nproc)
+```
+
+#### Windows (CUDA)
 
 ```powershell
 cmake -B build -G "Visual Studio 18 2022" -A x64 `
   -DGGML_CUDA=ON `
   -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;120;121"
-
 cmake --build build --config Release --target llama-server -j
 ```
 
-### Linux (CUDA)
+#### Using bench.sh (recommended)
+
+`bench.sh` auto-detects your GPU (NVIDIA or AMD), skips compilation if no source changes, and benchmarks all Ollama models automatically:
 
 ```bash
-cmake -B build \
-  -DGGML_CUDA=ON \
-  -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;120;121" \
-  -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build --target llama-server -j$(nproc)
+./bench.sh
+# Override GPU flags manually if needed:
+GPU_FLAGS="-DGGML_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx942" ./bench.sh
 ```
 
----
-
-## Branches
+### Branches
 
 | Branch | Description |
 |--------|-------------|
-| `feature/triattention` | **Default** — TurboQuant + TriAttention (latest) |
-| `feature/turboquant-kv-cache` | TurboQuant base (pre-TriAttention) |
+| `feature/supermerge` | **Main** — TurboQuant + TriAttention + PagedAttention |
+| `feature/triattention-paged` | TriAttention + PagedAttention (without TurboQuant KV) |
 | `master` | Upstream llama.cpp base |
 
----
+### Known issues / Current status
 
-## Credits
+> This section documents the real state of the project, including confirmed bugs and unverified functionality.
+
+#### 🔴 Critical — TurboQuant produces degenerate output
+
+The CUDA dispatch for `turbo2_0` / `turbo3_0` / `turbo4_0` applies a **flat** Hadamard to the Q vector, while K/V use WHT with random rotation (`TURBO_ROTATION_R`). The asymmetry produces degenerate attention scores. Observed symptoms: word repetition, then repeated `UNK`/`?` tokens. Active suspicion: incorrect initialization of `TURBO_ROTATION_R` or a transposed argument in the dequant kernel. **There is no evidence that these formats produce coherent text.**
+
+The 75 tok/s figure in the TriAttention table is with standard `Q4_K_M` + TriAttention — **not** with TurboQuant formats.
+
+#### 🔴 Stack buffer overflow — CPU dequant at head_dim=256
+
+A stack buffer overflow was identified in the CPU dequantization path for `head_dim=256` models (e.g. Llama-3 70B, Qwen2.5 72B). Not confirmed whether it was patched in `feature/supermerge`.
+
+#### 🟡 No regression tests for turbo2/3/4
+
+No test in `/tests` covers dequant correctness for `turbo2_0`, `turbo3_0`, `turbo4_0`. The existing `test-quantize-fns` does not exercise these types.
+
+#### 🟡 PagedAttention — engine present, CLI not connected
+
+The PagedAttention engine exists in the code but CLI flags are not implemented. Not usable from `llama-server` or `llama-cli`.
+
+#### 🟡 Ollama fork — integration unverified
+
+`nomadstar/ollama` is on `main` with no dedicated branch for TurboQuant. It is not confirmed whether the fork's `CMakeLists` points to the correct branch of this repo.
+
+#### ⚪ HIP/ROCm — no dedicated branch, untested on real AMD hardware
+
+Kernels use `ggml_cuda_dp4a` with AMD path in `common.cuh`, but the ROCm port has never been tested on real hardware.
+
+### Credits
 
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) — Georgi Gerganov and contributors
-- [TurboQuant](https://github.com/TheTom/llama-cpp-turboquant) — original TurboQuant fork
+- [TurboQuant](https://github.com/TheTom/llama-cpp-turboquant) — original TurboQuant fork by Tom
 - TriAttention algorithm — [arXiv 2604.04921](https://arxiv.org/abs/2604.04921)
 - GPU integration and KV cache implementation — [@atomicmilkshake](https://github.com/atomicmilkshake)
+- `feature/supermerge`, calibration tooling, AMD detection — [@nomadstar](https://github.com/nomadstar)
 
 ---
 
-*For the original llama.cpp documentation, see [docs/](docs/) or [github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp).*
+<a name="español"></a>
+## Español
+
+Fork personal de [llama.cpp](https://github.com/ggml-org/llama.cpp) que combina tres adiciones principales:
+
+- **TurboQuant** — formatos de cuantización de baja precisión (`turbo2`, `turbo3`, `turbo4`) con kernels CUDA optimizados que usan Transformada de Walsh-Hadamard (WHT) para codificación polar, reduciendo el footprint de memoria
+- **TriAttention** — poda de caché KV acelerada por GPU ([arXiv 2604.04921](https://arxiv.org/abs/2604.04921)) que puntúa la importancia de los tokens usando vectores clave con rotación RoPE invertida y evicta los menos relevantes, permitiendo inferencia de contexto largo dentro de un presupuesto fijo de memoria
+- **PagedAttention** — gestión de memoria KV por tabla de bloques ([arXiv 2309.06180](https://arxiv.org/abs/2309.06180)) — motor presente, flags CLI pendientes
+
+> **Nota de hardware:** La compresión KV de TurboQuant+ muestra mejoras de rendimiento significativas en contexto largo (≥16k tokens) en GPUs con ≥16 GB de VRAM. En GPUs más pequeñas (≤8 GB), la caché KV cabe en memoria independientemente de la cuantización en longitudes de contexto típicas, por lo que la mejora es insignificante.
+
+### Binarios precompilados para Windows
+
+Descarga el último build de release (Windows x64, CUDA 13, RTX 2000+) desde Hugging Face:
+
+**[🤗 atomicmilkshake/llama-cpp-turboquant-binaries](https://huggingface.co/atomicmilkshake/llama-cpp-turboquant-binaries)**
+
+> Requiere el runtime de CUDA 13.x (`cublasLt64_13.dll`). Instala el [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) o el redistribuible del runtime de CUDA si no lo tienes.
+
+### TriAttention
+
+TriAttention mantiene tu caché KV dentro de un presupuesto fijo de tokens puntuando periódicamente todos los tokens en caché y evictando los menos importantes. La puntuación usa la estructura geométrica de los vectores clave codificados con RoPE — no requiere pesos adicionales ni fine-tuning.
+
+#### Rendimiento (Qwen3-8B Q4\_K\_M, RTX 3080, `-c 512`)
+
+| Modo | Overhead de poda | Velocidad de generación |
+|------|-----------------|------------------------|
+| Sin límite de presupuesto | — | 17.5 tok/s |
+| Puntuación CPU | ~5.900 ms/evento | 17.5 tok/s |
+| **Puntuación GPU** | **~4–9 ms/evento** | **75,0 tok/s** |
+
+La puntuación GPU es ~1.000× más rápida que CPU. La mejora de 4.3× en velocidad de generación viene de mantener la caché KV dentro del presupuesto de VRAM (sin pausas por evicción, tamaños de lote consistentes en flash-attention).
+
+#### Inicio rápido
+
+```bash
+llama-server -m TuModelo.gguf -c 32768 -ngl 99 --port 8080 \
+  --triattention-stats modelo.triattention \
+  --triattention-budget 4096 \
+  --triattention-window 256 \
+  --triattention-log
+```
+
+Se requiere un archivo de calibración `.triattention`. Genera uno desde un modelo HuggingFace y un corpus de texto plano:
+
+```bash
+python3 scripts/calibrate-triattention.py \
+  --model Qwen/Qwen2.5-Coder-1.5B \
+  --corpus corpus.txt \
+  --output modelo.triattention \
+  --vram-gb 3 --ram-gb 20
+```
+
+#### Flags CLI
+
+| Flag | Por defecto | Descripción |
+|------|-------------|-------------|
+| `--triattention-stats <archivo>` | *(ninguno)* | Archivo de calibración — **requerido para activar TriAttention** |
+| `--triattention-budget <n>` | `512` | Máximo de tokens KV a retener tras cada poda |
+| `--triattention-window <n>` | `64` | Los N tokens más recientes siempre protegidos de evicción |
+| `--triattention-trigger <modo>` | `slack` | Cuándo podar: `slack` (presupuesto+ventana), `interval`, `fill` |
+| `--triattention-log` | desactivado | Imprime una línea por cada evento de poda |
+| `--triattention-no-protect-prefill` | desactivado | Permite evictar tokens del prompt (prefill) |
+
+#### Cómo funciona
+
+1. Cuando las celdas KV ocupadas superan `presupuesto + ventana` (modo SLACK), se dispara una poda
+2. Las `ventana` posiciones más recientes y todos los tokens del prefijo/prompt quedan protegidos
+3. Para cada par `(capa, cabeza)` muestreado, los vectores clave se leen de la caché KV, se invierte la rotación RoPE y se calcula una puntuación de desplazamiento geométrico en la GPU
+4. Los `presupuesto` tokens de mayor puntuación se conservan; el resto se evictan
+5. Los huecos de posición dejados por los tokens evictados son inofensivos — RoPE maneja posiciones no contiguas de forma nativa
+
+### TurboQuant
+
+TurboQuant proporciona tres formatos de cuantización personalizados que aplican rotación WHT antes de cuantizar:
+
+| Formato | Bits/peso | Notas |
+|---------|-----------|-------|
+| `turbo4_0` | ~4.0 | Reemplazo directo de `q4_0`, con agrupamiento basado en rotación |
+| `turbo3_0` | ~3.0 | Sub-byte con pre-rotación de Hadamard |
+| `turbo2_0` | ~2.0 | Compresión agresiva con centroides en espacio WHT |
+
+Todos los formatos tienen kernels CUDA optimizados para arquitecturas Turing+ (SM75) y Ampere (SM80/86). Las GPUs AMD son compatibles vía HIP (path portable `ggml_cuda_dp4a`) para RDNA3/RDNA4/CDNA3/CDNA4.
+
+### Compilar desde el código fuente
+
+#### Requisitos
+
+- Windows 10/11 o Linux
+- CUDA Toolkit 12.x o 13.x (o ROCm 5.x+ para AMD)
+- Visual Studio 2022+ con workload C++ (Windows) o GCC 11+ (Linux)
+- CMake 3.21+
+- ccache (recomendado — `bench.sh` lo usa para evitar recompilaciones innecesarias)
+
+#### Linux — NVIDIA (CUDA)
+
+```bash
+cmake -B build -DGGML_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;120;121"
+cmake --build build --config Release --parallel $(nproc)
+```
+
+#### Linux — AMD (ROCm/HIP)
+
+```bash
+cmake -B build -DGGML_HIP=ON \
+  -DCMAKE_HIP_ARCHITECTURES="gfx1100"   # ajusta a tu GPU
+cmake --build build --config Release --parallel $(nproc)
+```
+
+#### Windows (CUDA)
+
+```powershell
+cmake -B build -G "Visual Studio 18 2022" -A x64 `
+  -DGGML_CUDA=ON `
+  -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;120;121"
+cmake --build build --config Release --target llama-server -j
+```
+
+#### Usando bench.sh (recomendado)
+
+`bench.sh` detecta automáticamente tu GPU (NVIDIA o AMD), omite la compilación si no hay cambios en el código fuente, y hace benchmark de todos los modelos de Ollama automáticamente:
+
+```bash
+./bench.sh
+# Sobrescribir los flags de GPU manualmente si es necesario:
+GPU_FLAGS="-DGGML_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx942" ./bench.sh
+```
+
+### Ramas
+
+| Rama | Descripción |
+|------|-------------|
+| `feature/supermerge` | **Principal** — TurboQuant + TriAttention + PagedAttention |
+| `feature/triattention-paged` | TriAttention + PagedAttention (sin TurboQuant KV) |
+| `master` | Base de llama.cpp upstream |
+
+### Issues conocidos / Estado actual
+
+> Esta sección documenta el estado real del proyecto, incluyendo bugs confirmados y funcionalidad no verificada end-to-end.
+
+#### 🔴 Crítico — TurboQuant genera texto degenerado
+
+El dispatch CUDA de los formatos `turbo2_0` / `turbo3_0` / `turbo4_0` aplica un Hadamard **plano** al vector Q, mientras K/V usan WHT con rotación aleatoria (`TURBO_ROTATION_R`). La asimetría produce attention scores degenerados. Síntomas observados: repetición de palabras, luego tokens `UNK`/`?` repetidos. Sospecha activa: inicialización incorrecta del tensor `TURBO_ROTATION_R` o transposición de argumento en el kernel de dequant. **No hay evidencia de que estos formatos generen texto coherente.**
+
+Los 75 tok/s de la tabla de TriAttention son con `Q4_K_M` estándar + TriAttention — **no** con los formatos TurboQuant propios.
+
+#### 🔴 Stack buffer overflow — CPU dequant con head_dim=256
+
+Identificado un stack buffer overflow en el path de dequantización CPU para `head_dim=256` (ej. Llama-3 70B, Qwen2.5 72B). No está confirmado si quedó parcheado en `feature/supermerge`.
+
+#### 🟡 Sin tests de regresión para turbo2/3/4
+
+No existe ningún test en `/tests` que cubra correctitud de dequant para los tipos `turbo2_0`, `turbo3_0`, `turbo4_0`. El `test-quantize-fns` existente no los ejercita.
+
+#### 🟡 PagedAttention — engine presente, CLI no conectado
+
+El engine de PagedAttention existe en el código pero los flags CLI no están implementados. No es usable desde `llama-server` ni `llama-cli`.
+
+#### 🟡 Fork de Ollama — integración sin verificar
+
+`nomadstar/ollama` está en `main` sin rama específica para TurboQuant. No está confirmado si el `CMakeLists` del fork apunta al branch correcto de este repo.
+
+#### ⚪ HIP/ROCm — sin rama dedicada ni prueba en hardware AMD real
+
+Los kernels usan `ggml_cuda_dp4a` con path AMD en `common.cuh`, pero el port ROCm nunca fue probado en hardware real.
+
+### Créditos
+
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — Georgi Gerganov y colaboradores
+- [TurboQuant](https://github.com/TheTom/llama-cpp-turboquant) — fork original de TurboQuant por Tom
+- Algoritmo TriAttention — [arXiv 2604.04921](https://arxiv.org/abs/2604.04921)
+- Integración GPU e implementación del caché KV — [@atomicmilkshake](https://github.com/atomicmilkshake)
+- `feature/supermerge`, herramienta de calibración, detección AMD — [@nomadstar](https://github.com/nomadstar)
+
+---
+
+*Para la documentación original de llama.cpp, ver [docs/](docs/) o [github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp).*
 
 LLM inference in C/C++
 
