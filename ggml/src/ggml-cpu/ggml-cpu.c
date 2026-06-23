@@ -2069,6 +2069,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 // CPU fallback: row-by-row byte copy via page table
                 if (params->ith == 0) {
+                    fprintf(stderr, "[PAGED] cpu fallback: gather type=%d ne0=%" PRId64 " row_bytes=%zu\n",
+                            (int)tensor->src[0]->type, tensor->src[0]->ne[0],
+                            ggml_row_size(tensor->src[0]->type, tensor->src[0]->ne[0]));
                     const struct ggml_tensor * v_pool    = tensor->src[0];
                     const struct ggml_tensor * page_table = tensor->src[1];
                     int32_t block_size, n_kv;
