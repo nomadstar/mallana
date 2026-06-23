@@ -51,6 +51,7 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const int32_t n_rows  = n_kv * ns;
     const int32_t n_threads = (int32_t) std::min((int64_t)128, (row_bytes + 3) / 4);
 
+    fprintf(stderr, "[PAGED] cuda: gather kernel n_kv=%d ns=%d n_lpage=%d\n", n_kv, ns, n_lpage);
     paged_gather_v_kernel<<<n_rows, n_threads, 0, ctx.stream()>>>(
         d_pool, d_ptable, d_out,
         n_kv, ns, n_lpage, block_size, row_bytes);

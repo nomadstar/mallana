@@ -2107,6 +2107,7 @@ ggml_tensor * llm_graph_context::build_attn(
         memcpy(&bs, v_ptable->op_params, sizeof(int32_t));
 
         v = ggml_gather_paged_v(ctx0, v_pool, v_ptable, n_kv_val, bs);
+        fprintf(stderr, "[PAGED] graph: gather inserted il=%d n_kv=%d\n", il, n_kv_val);
 
         // Reshape gathered [n_embd_v_gqa, n_kv, ns] into [head_v_eff, n_head_kv, n_kv, ns] for FA
         const int64_t n_embd_v  = v_pool->ne[0];
