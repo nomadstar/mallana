@@ -51,6 +51,25 @@ Por defecto, el `llama.cpp` estándar asigna bloques de memoria continuos para e
 ### 2. TriAttention (Poda del Caché KV)
 TriAttention mantiene tu caché KV dentro de un presupuesto de tokens fijo evaluando periódicamente todos los tokens almacenados en caché y desalojando los menos importantes. La puntuación utiliza la estructura geométrica de los vectores clave codificados con RoPE — sin requerir pesos de modelo adicionales ni fine-tuning.
 
+**Nuevos parámetros de configuración (`llama-cli` / `llama-server`):**
+
+| Parámetro | Por Defecto | Descripción |
+|---|---|---|
+| `--triattention-stats PATH` | — | Archivo de calibración (requerido para activar) |
+| `--triattention-budget N` | 2048 | Posiciones máximas de KV a retener tras la poda |
+| `--triattention-window N` | 128 | Intervalo de poda (en tokens decodificados) |
+| `--triattention-offset-max N` | 65536 | Desplazamiento geométrico máximo para puntuación |
+| `--triattention-mode MODE` | global | Granularidad de poda: `global`, `per-kv-head`, `per-layer-head` |
+| `--triattention-trigger MODE` | interval | Condición de poda: `interval`, `slack` |
+| `--triattention-agg MODE` | mean | Agregación de puntuaciones: `mean`, `max` |
+| `--triattention-seed N` | 0 | Semilla RNG para desempatar ruido (-1 para desactivar) |
+| `--triattention-normalize` | — | Normalización Z-score de puntuaciones por cabezal previo a ordenar |
+| `--triattention-no-protect-prefill` | — | Permite desalojar tokens iniciales (por defecto están protegidos) |
+| `--triattention-disable-mlr` | — | Ablación: desactiva el ponderado de frecuencia MLR |
+| `--triattention-disable-trig` | — | Ablación: usa puntuación de norma (sin componente trigonométrica) |
+| `--triattention-log` | — | Registra los eventos de poda en `stderr` |
+
+
 **Rendimiento (Qwen3-8B Q4_K_M, RTX 3080, `-c 512`)**
 | Modo | Sobrecarga de poda | Velocidad de generación |
 |------|---------------|-----------------|

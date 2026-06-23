@@ -206,8 +206,15 @@ Key flags:
 | `--triattention-stats PATH` | — | Calibration file (required to enable) |
 | `--triattention-budget N` | 2048 | Max KV positions retained after pruning |
 | `--triattention-window N` | 128 | Pruning interval in decode tokens |
-| `--triattention-mode` | global | `global`, `per-kv-head`, `per-layer-head` |
-| `--triattention-no-protect-prefill` | — | Allow evicting prompt tokens |
+| `--triattention-offset-max N` | 65536 | Max geometric offset for scoring |
+| `--triattention-mode MODE` | global | Pruning granularity: `global`, `per-kv-head`, `per-layer-head` |
+| `--triattention-trigger MODE` | interval | Pruning trigger: `interval`, `slack` |
+| `--triattention-agg MODE` | mean | Score aggregation: `mean`, `max` |
+| `--triattention-seed N` | 0 | RNG seed for tie-breaking noise (-1 to disable) |
+| `--triattention-normalize` | — | Z-score normalize scores per head before ranking |
+| `--triattention-no-protect-prefill` | — | Allow evicting prompt tokens (default: protected) |
+| `--triattention-disable-mlr` | — | Ablation: disable MLR frequency weighting |
+| `--triattention-disable-trig` | — | Ablation: use norm-only scoring (no trigonometric component) |
 | `--triattention-log` | — | Print pruning events to stderr |
 
 ## Pending work
