@@ -58,7 +58,7 @@ def parse_args():
     p.add_argument("--n-samples",   type=int, default=512,  help="Number of random windows to process")
     p.add_argument("--sample-heads",type=int, default=0,    help="Attention heads to sample (0 = all)")
     p.add_argument("--max-seq-len", type=int, default=2048, help="Token window length per sample")
-    p.add_argument("--vram-gb",     type=int, default=3,    help="Max VRAM to use (GiB)")
+    p.add_argument("--vram-gb",     type=int, default=2,    help="Max VRAM to use (GiB)")
     p.add_argument("--ram-gb",      type=int, default=20,   help="Max CPU RAM to use (GiB)")
     p.add_argument("--dtype",       default="bfloat16", choices=["float32", "bfloat16"])
     p.add_argument("--seed",        type=int, default=42)
@@ -120,9 +120,17 @@ def collect_q_activations(model, tok, corpus_text, cfg, args):
     head_dim    = cfg["head_dim"]
     max_seq_len = args.max_seq_len
 
-    # Tokenise full corpus
-    tokens = tok(corpus_text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+    # Tokenise corpus in chunks to avoid the "sequence too long" warning.
+    # We split the raw text into ~4k-char pieces and tokenize each separately.
+    chunk_size  = 16000  # characters per tokenization call
+    token_lists = []
+    for i in range(0, len(corpus_text), chunk_size):
+        chunk = corpus_text[i:i + chunk_size]
+        ids   = tok(chunk, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        token_lists.append(ids)
+    tokens   = torch.cat(token_lists, dim=0)
     n_tokens = tokens.shape[0]
+    print(f"[calibrate] Corpus: {n_tokens} tokens")
     if n_tokens < max_seq_len:
         print(f"[calibrate] WARNING: corpus only {n_tokens} tokens (< {max_seq_len}). "
               "Using the whole corpus as one sample.")
