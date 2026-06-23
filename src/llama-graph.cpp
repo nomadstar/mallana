@@ -428,6 +428,10 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
+    if (self_v_page_table) {
+        mctx->set_input_v_page_table(self_v_page_table, ubatch);
+    }
+
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
 }
 
@@ -2034,6 +2038,10 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
         inp->self_v_idxs = mctx_cur->build_input_v_idxs(ctx0, ubatch);
 
+        if (mctx_cur->is_paged()) {
+            inp->self_v_page_table = mctx_cur->build_input_v_page_table(ctx0);
+        }
+
         inp->self_kq_mask = build_kq_mask(ctx0, mctx_cur, ubatch, cparams);
 
         ggml_set_input(inp->self_kq_mask);
@@ -2088,7 +2096,32 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    ggml_tensor * v;
+    if (inp->self_v_page_table) {
+        // PagedAttention Phase 1: gather V rows via page table before FA
+        ggml_tensor * v_pool   = mctx_cur->get_v_paged(ctx0, il);
+        ggml_tensor * v_ptable = inp->self_v_page_table;
+
+        const int32_t n_kv_val = (int32_t) mctx_cur->get_n_kv();
+        int32_t bs;
+        memcpy(&bs, v_ptable->op_params, sizeof(int32_t));
+
+        v = ggml_gather_paged_v(ctx0, v_pool, v_ptable, n_kv_val, bs);
+
+        // Reshape gathered [n_embd_v_gqa, n_kv, ns] into [head_v_eff, n_head_kv, n_kv, ns] for FA
+        const int64_t n_embd_v  = v_pool->ne[0];
+        const int64_t n_head_kv = (int64_t) hparams.n_head_kv(il);
+        const int64_t head_v_eff = n_embd_v / n_head_kv;
+        const int64_t ns        = v_ptable->ne[1];
+        v = ggml_view_4d(ctx0, v,
+                head_v_eff, n_head_kv, n_kv_val, ns,
+                ggml_row_size(v->type, head_v_eff),
+                ggml_row_size(v->type, n_embd_v),
+                ggml_row_size(v->type, n_embd_v * n_kv_val),
+                0);
+    } else {
+        v = mctx_cur->get_v(ctx0, il);
+    }
 
     // TurboQuant pre-rotate-queries: O(d log d) WHT rotation via custom op
     // Q shape: (n_embd_head, n_head, n_tokens)

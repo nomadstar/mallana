@@ -2065,6 +2065,33 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_turbo_wht(params, tensor);
             } break;
+        case GGML_OP_GATHER_PAGED_V:
+            {
+                // CPU fallback: row-by-row byte copy via page table
+                if (params->ith == 0) {
+                    const struct ggml_tensor * v_pool    = tensor->src[0];
+                    const struct ggml_tensor * page_table = tensor->src[1];
+                    int32_t block_size, n_kv;
+                    memcpy(&block_size, tensor->op_params + 0, sizeof(int32_t));
+                    memcpy(&n_kv,       tensor->op_params + 4, sizeof(int32_t));
+                    const int32_t ns     = (int32_t) page_table->ne[1];
+                    const int64_t n_lpage = page_table->ne[0];
+                    const size_t  row_bytes = ggml_row_size(v_pool->type, v_pool->ne[0]);
+                    const char    * pool_data  = (const char *)    v_pool->data;
+                    const int32_t * ptable     = (const int32_t *) page_table->data;
+                    char          * out_data   = (char *)           tensor->data;
+                    for (int32_t s = 0; s < ns; s++) {
+                        for (int32_t r = 0; r < n_kv; r++) {
+                            const int32_t lpage   = r / block_size;
+                            const int32_t within  = r % block_size;
+                            const int32_t pblock  = ptable[s * n_lpage + lpage];
+                            const int64_t src_row = (int64_t)pblock * block_size + within;
+                            memcpy(out_data + ((int64_t)s*n_kv + r) * row_bytes,
+                                   pool_data + src_row * row_bytes, row_bytes);
+                        }
+                    }
+                }
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2246,6 +2273,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
         case GGML_OP_TURBO_WHT:
+        case GGML_OP_GATHER_PAGED_V:
             {
                 n_tasks = n_threads;
             } break;
@@ -2961,6 +2989,7 @@ struct ggml_cplan ggml_graph_plan(
                         cur = S_v * sizeof(float) * n_tasks;
                     } break;
                 case GGML_OP_TURBO_WHT:
+                case GGML_OP_GATHER_PAGED_V:
                     {
                         cur = 0;  // no extra workspace needed
                     } break;

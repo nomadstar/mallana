@@ -57,6 +57,7 @@
 #include "ggml-cuda/set.cuh"
 #include "ggml-cuda/set-rows.cuh"
 #include "ggml-cuda/turbo-wht.cuh"
+#include "ggml-cuda/paged-gather.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
 #include "ggml-cuda/solve_tri.cuh"
 #include "ggml-cuda/tri.cuh"
@@ -2513,6 +2514,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_TURBO_WHT:
             ggml_cuda_turbo_wht(ctx, dst);
+            break;
+        case GGML_OP_GATHER_PAGED_V:
+            ggml_cuda_gather_paged_v(ctx, dst);
             break;
         case GGML_OP_SET:
             ggml_cuda_op_set(ctx, dst);
@@ -4980,6 +4984,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_TURBO_WHT:
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
                    op->src[0]->ne[0] % 64 == 0;  // head dim must be divisible by 64 (supports 64 and 128 WHT groups)
+        case GGML_OP_GATHER_PAGED_V:
+            return ggml_row_size(op->src[0]->type, op->src[0]->ne[0]) % 4 == 0;
         case GGML_OP_SSM_SCAN: {
             if (op->src[3]->ne[0] == 1) {
                 // Mamba2

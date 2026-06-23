@@ -563,6 +563,7 @@ extern "C" {
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_TURBO_WHT,
+        GGML_OP_GATHER_PAGED_V,
 
         GGML_OP_UNARY,
 
@@ -2494,6 +2495,18 @@ extern "C" {
             int                   direction,
             int                   group_size,    // 0 = auto (64 or 128 from ne[0])
             struct ggml_tensor  * scale);        // NULL = no InnerQ scaling
+
+    // Paged gather for V cache: gathers quantized V rows via page table before FlashAttention.
+    // src[0]: V pool [n_embd_v_gqa, pool_size, 1], any quantized type
+    // src[1]: page table [n_lpage, ns], GGML_TYPE_I32 — physical block index per logical page
+    // op_params[0]: block_size (int32)  op_params[1]: n_kv (int32)
+    // output: [n_embd_v_gqa, n_kv, ns], same type as src[0], contiguous
+    GGML_API struct ggml_tensor * ggml_gather_paged_v(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * v_pool,
+            struct ggml_tensor  * page_table,
+            int32_t               n_kv,
+            int32_t               block_size);
 
     // custom operators
 

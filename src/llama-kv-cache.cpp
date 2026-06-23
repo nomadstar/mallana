@@ -362,12 +362,33 @@ llama_kv_cache::llama_kv_cache(
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+
+    // Initialize PagedAttention block pool (FA path only — SDPA/v_trans uses legacy addressing)
+    pg_enabled = !v_trans;
+    if (pg_enabled) {
+        const uint32_t n_pages_per_stream = (kv_size + pg_block_size - 1) / pg_block_size;
+        pg_n_blocks = n_pages_per_stream * n_stream;
+        pg_page_table.assign(n_stream, std::vector<int32_t>(n_pages_per_stream, -1));
+        pg_free_blocks.resize(pg_n_blocks);
+        for (uint32_t i = 0; i < pg_n_blocks; ++i) {
+            pg_free_blocks[i] = pg_n_blocks - 1 - i;
+        }
+    }
 }
 
 void llama_kv_cache::clear(bool data) {
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
+        if (pg_enabled) {
+            for (auto & p : pg_page_table[s]) { p = -1; }
+        }
+    }
+    if (pg_enabled) {
+        pg_free_blocks.resize(pg_n_blocks);
+        for (uint32_t i = 0; i < pg_n_blocks; ++i) {
+            pg_free_blocks[i] = pg_n_blocks - 1 - i;
+        }
     }
 
     if (data) {
@@ -450,6 +471,31 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
             }
         }
     }
+
+    // Free physical pages for any page whose cells are now all empty
+    if (pg_enabled) {
+        const uint32_t kv_sz = (uint32_t) v_cells[0].size();
+        const uint32_t n_pages_per_stream = (kv_sz + pg_block_size - 1) / pg_block_size;
+        auto try_free_page = [&](uint32_t strm, uint32_t lpage) {
+            if (pg_page_table[strm][lpage] < 0) return;
+            const auto & cells = v_cells[strm];
+            const uint32_t lo = lpage * pg_block_size;
+            const uint32_t hi = std::min(lo + pg_block_size, kv_sz);
+            for (uint32_t c = lo; c < hi; ++c) {
+                if (!cells.is_empty(c)) return;
+            }
+            pg_free_blocks.push_back(pg_page_table[strm][lpage]);
+            pg_page_table[strm][lpage] = -1;
+        };
+        if (seq_id >= 0) {
+            const uint32_t strm = seq_to_stream[seq_id];
+            for (uint32_t lp = 0; lp < n_pages_per_stream; ++lp) { try_free_page(strm, lp); }
+        } else {
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                for (uint32_t lp = 0; lp < n_pages_per_stream; ++lp) { try_free_page(s, lp); }
+            }
+        }
+    } // pg_enabled
 
     return true;
 }
@@ -1138,6 +1184,23 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
     }
 }
 
+void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
+    if (!pg_enabled) return;
+    const uint32_t n_pages_per_stream = (uint32_t) pg_page_table[0].size();
+    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+        const uint32_t strm = sinfo.strm[s];
+        for (const uint32_t cell_idx : sinfo.idxs[s]) {
+            const uint32_t lpage = cell_idx / pg_block_size;
+            GGML_ASSERT(lpage < n_pages_per_stream);
+            if (pg_page_table[strm][lpage] < 0) {
+                GGML_ASSERT(!pg_free_blocks.empty() && "PagedAttention: out of physical blocks");
+                pg_page_table[strm][lpage] = pg_free_blocks.back();
+                pg_free_blocks.pop_back();
+            }
+        }
+    }
+}
+
 bool llama_kv_cache::get_can_shift() const {
     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
     if (model.arch == LLM_ARCH_STEP35) {
@@ -1252,6 +1315,44 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(v->type, kv_size),                         // v->nb[2]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa),            // v->nb[3]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
+}
+
+ggml_tensor * llama_kv_cache::get_v_paged(ggml_context * ctx, int32_t il, uint32_t /*n_kv*/, const slot_info & /*sinfo*/) const {
+    GGML_ASSERT(pg_enabled);
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * v = layers[ikv].v;
+    const int64_t pool_rows = (int64_t)v->ne[1] * v->ne[2];  // kv_size * n_stream
+    // Return as flat 2D [n_embd_v_gqa, pool_rows] view (single stream dimension = flat pool)
+    return ggml_reshape_2d(ctx, v, v->ne[0], pool_rows);
+}
+
+ggml_tensor * llama_kv_cache::build_input_v_page_table(ggml_context * ctx, uint32_t n_kv, const slot_info & sinfo) const {
+    GGML_ASSERT(pg_enabled);
+    const uint32_t ns     = sinfo.s1 - sinfo.s0 + 1;
+    const uint32_t n_lpage = (n_kv + pg_block_size - 1) / pg_block_size;
+    ggml_tensor * ptable = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_lpage, ns);
+    // Store block_size in op_params so the graph builder can retrieve it without access to kv internals
+    int32_t bs = (int32_t) pg_block_size;
+    memcpy(ptable->op_params, &bs, sizeof(int32_t));
+    ggml_set_input(ptable);
+    return ptable;
+}
+
+void llama_kv_cache::set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, const slot_info & sinfo) const {
+    GGML_ASSERT(pg_enabled);
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    const uint32_t ns     = sinfo.s1 - sinfo.s0 + 1;
+    const uint32_t n_lpage = (uint32_t) dst->ne[0];
+    int32_t * data = (int32_t *) dst->data;
+    for (uint32_t s = 0; s < ns; ++s) {
+        const uint32_t strm = sinfo.s0 + s;
+        for (uint32_t lp = 0; lp < n_lpage; ++lp) {
+            const int32_t pblock = pg_page_table[strm][lp];
+            // pblock == -1 means the page was never written — use block 0 as safe fallback (padding region)
+            data[s * n_lpage + lp] = (pblock >= 0) ? pblock : 0;
+        }
+    }
+    (void) n_kv;
 }
 
 ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
@@ -1413,11 +1514,24 @@ void llama_kv_cache::set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ub
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
     int64_t * data = (int64_t *) dst->data;
 
-    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
-        const int64_t offs = sinfo.strm[s]*get_size();
-
-        for (uint32_t i = 0; i < sinfo.size(); ++i) {
-            data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
+    if (pg_enabled) {
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            const uint32_t strm = sinfo.strm[s];
+            for (uint32_t i = 0; i < sinfo.size(); ++i) {
+                const uint32_t cell_idx = sinfo.idxs[s][i];
+                const uint32_t lpage    = cell_idx / pg_block_size;
+                const uint32_t within   = cell_idx % pg_block_size;
+                const int32_t  pblock   = pg_page_table[strm][lpage];
+                GGML_ASSERT(pblock >= 0 && "PagedAttention: page not allocated when writing K idx");
+                data[s*sinfo.size() + i] = (int64_t)pblock * pg_block_size + within;
+            }
+        }
+    } else {
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            const int64_t offs = sinfo.strm[s]*get_size();
+            for (uint32_t i = 0; i < sinfo.size(); ++i) {
+                data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
+            }
         }
     }
 }
@@ -1430,11 +1544,24 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
     int64_t * data = (int64_t *) dst->data;
 
     if (!v_trans) {
-        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
-            const int64_t offs = sinfo.strm[s]*get_size();
-
-            for (uint32_t i = 0; i < sinfo.size(); ++i) {
-                data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
+        if (pg_enabled) {
+            for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+                const uint32_t strm = sinfo.strm[s];
+                for (uint32_t i = 0; i < sinfo.size(); ++i) {
+                    const uint32_t cell_idx = sinfo.idxs[s][i];
+                    const uint32_t lpage    = cell_idx / pg_block_size;
+                    const uint32_t within   = cell_idx % pg_block_size;
+                    const int32_t  pblock   = pg_page_table[strm][lpage];
+                    GGML_ASSERT(pblock >= 0 && "PagedAttention: page not allocated when writing V idx");
+                    data[s*sinfo.size() + i] = (int64_t)pblock * pg_block_size + within;
+                }
+            }
+        } else {
+            for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+                const int64_t offs = sinfo.strm[s]*get_size();
+                for (uint32_t i = 0; i < sinfo.size(); ++i) {
+                    data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
+                }
             }
         }
     } else {
@@ -2442,6 +2569,7 @@ bool llama_kv_cache_context::apply() {
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
     n_kv = kv->get_n_kv(sinfos[i_cur]);
+    kv->pg_alloc_for_sinfo(sinfos[i_cur]);
 
     // InnerQ: check if CUDA calibration finalized and tensor needs update
     if (kv->get_turbo_innerq_scale_inv() != nullptr && turbo_innerq_needs_tensor_update()) {
@@ -2476,6 +2604,22 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
 
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+bool llama_kv_cache_context::is_paged() const {
+    return kv->pg_enabled;
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_paged(ggml_context * ctx, int32_t il) const {
+    return kv->get_v_paged(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::build_input_v_page_table(ggml_context * ctx) const {
+    return kv->build_input_v_page_table(ctx, n_kv, sinfos[i_cur]);
+}
+
+void llama_kv_cache_context::set_input_v_page_table(ggml_tensor * dst, const llama_ubatch * /*ubatch*/) const {
+    kv->set_input_v_page_table(dst, n_kv, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_context::get_turbo_rotation() const {

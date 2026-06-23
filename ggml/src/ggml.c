@@ -1065,6 +1065,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SOLVE_TRI",
     "GATED_DELTA_NET",
     "TURBO_WHT",
+    "GATHER_PAGED_V",
 
     "UNARY",
 
@@ -1176,6 +1177,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "A X = B, A triangular, solve X",
     "gated_delta_net(q, k, v, g, beta, s)",
     "turbo_wht(a)",
+    "gather_paged_v(pool,ptable)",
 
     "unary(x)",
 
@@ -6248,6 +6250,32 @@ struct ggml_tensor * ggml_turbo_wht(
     // Store direction and group_size in op_params
     memcpy(result->op_params + 0, &direction, sizeof(int));
     memcpy(result->op_params + sizeof(int), &group_size, sizeof(int));
+
+    return result;
+}
+
+// ggml_gather_paged_v
+
+struct ggml_tensor * ggml_gather_paged_v(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * v_pool,
+        struct ggml_tensor  * page_table,
+        int32_t               n_kv,
+        int32_t               block_size) {
+    GGML_ASSERT(page_table->type == GGML_TYPE_I32);
+    GGML_ASSERT(block_size > 0 && n_kv >= 0);
+
+    const int32_t ns = (int32_t) page_table->ne[1];  // number of streams
+
+    const int64_t ne[4] = { v_pool->ne[0], n_kv, ns, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, v_pool->type, 3, ne);
+
+    memcpy(result->op_params + 0, &block_size, sizeof(int32_t));
+    memcpy(result->op_params + 4, &n_kv,       sizeof(int32_t));
+
+    result->op    = GGML_OP_GATHER_PAGED_V;
+    result->src[0] = v_pool;
+    result->src[1] = page_table;
 
     return result;
 }

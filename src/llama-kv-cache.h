@@ -162,6 +162,14 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
+    // PagedAttention: get V pool as flat view and build/fill page table tensor
+    ggml_tensor * get_v_paged(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    ggml_tensor * build_input_v_page_table(ggml_context * ctx, uint32_t n_kv, const slot_info & sinfo) const;
+    void          set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, const slot_info & sinfo) const;
+
+    // Allocate physical pages for all cells assigned in sinfo (called after real apply_ubatch)
+    void pg_alloc_for_sinfo(const slot_info & sinfo);
+
     // TurboQuant: get rotation matrices (stored as row-major C arrays)
     // turbo_rotation = R (forward rotation, for Q pre-rotate-queries)
     // turbo_rotation_inv = R^T = R^{-1} (inverse rotation, for V output un-rotation)
@@ -268,6 +276,17 @@ private:
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
+    // PagedAttention block pool
+    // Blocks are the unit of allocation; block_size tokens per block.
+    // pg_page_table[stream][lpage] = physical block index (-1 = not yet allocated)
+    // Physical row index = pblock * pg_block_size + within_block
+    // PagedAttention is only enabled when v_trans==false (Flash Attention path).
+    bool     pg_enabled    = false;
+    uint32_t pg_block_size = 32;
+    uint32_t pg_n_blocks   = 0;
+    std::vector<std::vector<int32_t>> pg_page_table;   // [n_stream][n_pages_per_stream]
+    std::vector<int32_t>              pg_free_blocks;  // stack of free physical block indices
+
     size_t total_size() const;
 
     size_t size_k_bytes() const;
@@ -347,6 +366,12 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+
+    // PagedAttention V gather support
+    bool          is_paged() const;
+    ggml_tensor * get_v_paged(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * build_input_v_page_table(ggml_context * ctx) const;
+    void          set_input_v_page_table(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     // TurboQuant rotation accessors
     ggml_tensor * get_turbo_rotation() const;
