@@ -364,7 +364,7 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // Initialize PagedAttention block pool (FA path only — SDPA/v_trans uses legacy addressing)
-    pg_enabled = !v_trans;
+    pg_enabled = !v_trans && (getenv("LLAMA_NO_PAGING") == nullptr);
     if (pg_enabled) {
         const uint32_t n_pages_per_stream = (kv_size + pg_block_size - 1) / pg_block_size;
         pg_n_blocks = n_pages_per_stream * n_stream;
