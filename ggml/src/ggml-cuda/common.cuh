@@ -342,6 +342,16 @@ static constexpr __device__ int ggml_cuda_get_physical_warp_size() {
 #endif // defined(GGML_USE_HIP) && (defined(__GFX9__) || defined(__GFX8__))
 }
 
+// Programmatic Dependent Launch (PDL) — no-ops; sm_90+ only, not needed on this hardware.
+static __device__ __forceinline__ void ggml_cuda_pdl_sync() {}
+static __device__ __forceinline__ void ggml_cuda_pdl_lc() {}
+
+#ifdef __clang__
+#  define GGML_CUDA_RESTRICT
+#else
+#  define GGML_CUDA_RESTRICT __restrict__
+#endif
+
 // Maximum number of bytes that can be copied in a single instruction.
 static constexpr __device__ int ggml_cuda_get_max_cpy_bytes() {
 #ifdef GGML_USE_HIP

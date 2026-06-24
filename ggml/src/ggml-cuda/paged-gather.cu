@@ -86,11 +86,11 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                                ptable_elems * sizeof(int32_t),
                                cudaMemcpyDefault, ctx.stream()));
 
-    // [DIAG2] Synchronous readback of ptable to verify actual kernel values.
+    // [DIAG2] Synchronous readback of ptable + pool rows to verify actual kernel values.
     {
         static int  s_decode_call2 = 0;
         static bool s_first_layer2 = true;
-        if (s_first_layer2) {
+        if (s_first_layer2 && ns > 1) {
             CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
             std::vector<int32_t> h_verify(ptable_elems);
             CUDA_CHECK(cudaMemcpy(h_verify.data(), ptable_buf.get(),
@@ -101,6 +101,32 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 fprintf(stderr, "%d%s", h_verify[i], (i+1<ptable_elems)?",":"");
             }
             fprintf(stderr, "]\n");
+
+            // Read first 4 F16 values from pool rows 0 and 64 to verify cpy_v wrote different data
+            auto read_pool_row = [&](int64_t row_idx, const char * label) {
+                std::vector<uint16_t> h_row(4);
+                CUDA_CHECK(cudaMemcpy(h_row.data(), d_pool + row_idx * row_bytes,
+                                      4 * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+                fprintf(stderr, "  pool_row[%s]=[", label);
+                for (int j = 0; j < 4; ++j) {
+                    uint16_t v = h_row[j];
+                    uint32_t sign=(v>>15)&1, exp=(v>>10)&0x1f, mant=v&0x3ff;
+                    uint32_t f32 = (exp==0) ? ((sign<<31)|(mant<<13)) :
+                                   (exp==31) ? ((sign<<31)|(0xff<<23)|(mant<<13)) :
+                                               ((sign<<31)|((exp+112)<<23)|(mant<<13));
+                    float fv; memcpy(&fv,&f32,4);
+                    fprintf(stderr,"%.4f,",fv);
+                }
+                fprintf(stderr,"]\n");
+            };
+            // Stream 0: pblock 0 → pool row 0. Stream 1: pblock 2 → pool row 64.
+            read_pool_row(0, "pblk0=row0");
+            read_pool_row(1, "pblk0=row1");   // pos 1 of stream0 (different from pos 0)
+            if (h_verify[8] >= 0) {  // strm1 lpage0 pblock
+                const int32_t pblk_s1 = h_verify[8];
+                read_pool_row((int64_t)pblk_s1 * block_size,     "strm1_lp0_first");
+                read_pool_row((int64_t)pblk_s1 * block_size + 1, "strm1_lp0_second");
+            }
             ++s_decode_call2;
         }
         s_first_layer2 = !s_first_layer2;
@@ -112,4 +138,60 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     paged_gather_v_kernel<<<n_rows, n_threads, 0, ctx.stream()>>>(
         d_pool, ptable_buf.get(), d_out,
         n_kv, ns, n_lpage, block_size, row_bytes);
+
+    // [DIAG3] After gather: readback first 4 F16 values for each stream's first KV pos
+    {
+        static int  s_dc3 = 0;
+        static bool s_fl3 = true;
+        if (s_fl3 && ns > 1) {
+            CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+            // Also read pool rows to see what was in there before gather
+            // Read 8 values from out (4 F16 values per stream for first KV position)
+            const int n_f16_per_row = (int)(row_bytes / 2);
+            const int n_sample = std::min(4, n_f16_per_row);
+            std::vector<uint16_t> h_out(ns * n_sample);
+            for (int s = 0; s < ns; ++s) {
+                CUDA_CHECK(cudaMemcpy(h_out.data() + s*n_sample,
+                                      d_out + (int64_t)s * n_kv * row_bytes,
+                                      n_sample * sizeof(uint16_t),
+                                      cudaMemcpyDeviceToHost));
+            }
+            // Also read pool rows corresponding to each stream's first pblock
+            fprintf(stderr, "[PGATHER3#%d] ns=%d, gathered out stream0[kv=0][0..%d]=",
+                    s_dc3, ns, n_sample-1);
+            for (int j = 0; j < n_sample; ++j) {
+                uint16_t v = h_out[j];
+                float fv;
+                // F16 → F32 manual: sign, exp, mantissa
+                uint32_t sign = (v >> 15) & 1;
+                uint32_t exp  = (v >> 10) & 0x1f;
+                uint32_t mant = v & 0x3ff;
+                uint32_t f32;
+                if (exp == 0) { f32 = (sign << 31) | ((mant) << 13); }
+                else if (exp == 31) { f32 = (sign << 31) | (0xff << 23) | (mant << 13); }
+                else { f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13); }
+                memcpy(&fv, &f32, 4);
+                fprintf(stderr, "%.3f,", fv);
+            }
+            for (int s = 1; s < ns; ++s) {
+                fprintf(stderr, " strm%d[kv=0][0..%d]=", s, n_sample-1);
+                for (int j = 0; j < n_sample; ++j) {
+                    uint16_t v = h_out[s*n_sample + j];
+                    float fv;
+                    uint32_t sign = (v >> 15) & 1;
+                    uint32_t exp  = (v >> 10) & 0x1f;
+                    uint32_t mant = v & 0x3ff;
+                    uint32_t f32;
+                    if (exp == 0) { f32 = (sign << 31) | ((mant) << 13); }
+                    else if (exp == 31) { f32 = (sign << 31) | (0xff << 23) | (mant << 13); }
+                    else { f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13); }
+                    memcpy(&fv, &f32, 4);
+                    fprintf(stderr, "%.3f,", fv);
+                }
+            }
+            fprintf(stderr, "\n");
+            ++s_dc3;
+        }
+        s_fl3 = !s_fl3;
+    }
 }
