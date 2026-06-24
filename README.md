@@ -43,7 +43,7 @@ unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 ## Current Status
 
 | Component | Status |
-|---|---|---|
+|---|---|
 | CPU TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
 | CUDA TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
 | CPU/CUDA Mathematical Equivalence Audit | ✅ Complete |
