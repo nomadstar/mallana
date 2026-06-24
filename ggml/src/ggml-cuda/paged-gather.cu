@@ -53,6 +53,8 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const void * ptable_src = page_table->data;
 
     // [DIAG] Print gather params for first layer of every decode call.
+    // cudaPointerAttributes / cudaPointerGetAttributes are CUDA-only; skip on HIP.
+#ifndef __HIPCC__
     {
         static int  s_decode_call = 0;
         static bool s_first_layer = true;
@@ -80,6 +82,7 @@ void ggml_cuda_gather_paged_v(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         }
         s_first_layer = !s_first_layer;
     }
+#endif // !__HIPCC__
 
     ggml_cuda_pool_alloc<int32_t> ptable_buf(ctx.pool(), ptable_elems);
     CUDA_CHECK(cudaMemcpyAsync(ptable_buf.get(), ptable_src,

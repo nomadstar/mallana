@@ -43,15 +43,16 @@ unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 ## Current Status
 
 | Component | Status |
-|---|---|
-| CPU TurboQuant (turbo2, turbo3, turbo4) | ✅ Stable |
-| CUDA TurboQuant (turbo2, turbo3, turbo4) | ✅ Stable |
+|---|---|---|
+| CPU TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
+| CUDA TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
+| CPU/CUDA Mathematical Equivalence Audit | ✅ Complete |
 | Flash Attention Integration | ✅ Stable |
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
 | Quality Gate (automated PPL + speed) | ✅ Operational |
 | Paged Attention (Phase 1) | 🚧 In Progress |
 | TriAttention | 🚧 In Progress |
-| ROCm / HIP Support | 🚧 In Progress |
+| ROCm / HIP Portability Audit | ✅ Complete — Prepared |
 | Metal Support | ✅ Stable |
 | Vulkan Support | ❌ Not Started |
 
@@ -68,32 +69,50 @@ on groups of 128 elements (typically one head dimension).
 
 ---
 
-## Recent Validation Results
+## Validation Results
+
+### CPU/CUDA Mathematical Consistency Audit
+
+The implementation has undergone a complete mathematical consistency audit verifying that
+CPU and CUDA paths share identical numerical contracts:
+
+| Checked Item | Status |
+|---|---|
+| WHT sign arrays (CPU vs CUDA) | ✅ Identical |
+| WHT butterfly order (CPU vs CUDA) | ✅ Identical |
+| WHT normalization | ✅ Identical |
+| Turbo2/3/4 centroids | ✅ Match |
+| Turbo2/3/4 packing format | ✅ Match |
+| Turbo2/3/4 dequantization | ✅ Match |
+| Norm correction after quantize | ✅ Match |
+| `vec_dot` contract | ✅ Correct |
+| InnerQ scaling contract | ✅ Correct |
+| WHT-only rotation (post-turbo4-fix) | ✅ Shared contract |
+
+**Engineering verdict:**
+
+> No correctness-critical CPU/CUDA mathematical mismatches remain.
+
+This marks a transition: the project has moved from debugging the implementation to building
+new capabilities on a validated foundation.
 
 ### Llama-3.2-3B F16 — Perplexity
-
-Baseline (F16, no quantization):
 
 | Configuration | PPL |
 |---|---|
 | Baseline (F16) | 8.68 |
-
-TurboQuant variations:
-
-| Configuration | PPL |
-|---|---|
 | turbo2 K | 13.42 |
 | turbo3 K | 9.45 |
 | turbo4 K | 8.99 |
 | turbo4 V | 8.76 |
 | turbo4 K + turbo4 V | 8.99 |
 
-CPU TurboQuant is now considered validated for Llama-family models. The `turbo4` types show
-less than 0.4 PPL degradation from baseline, while `turbo3` shows less than 0.8 PPL
-degradation. The asymmetric policy (`q8_0` K + `turbo4` V) is within 0.1 PPL of baseline.
+CPU TurboQuant is validated for Llama-family models. The `turbo4` types show less than 0.4
+PPL degradation from baseline, `turbo3` less than 0.8 PPL. The asymmetric policy
+(`q8_0` K + `turbo4` V) is within 0.1 PPL of baseline.
 
-> **Note:** These validation results were generated using the test infrastructure in
-> `scripts/turbo-quality-gate.sh` and `llama-perplexity`.
+> **Note:** These results were generated using `llama-perplexity` on wikitext-2 with the
+> infrastructure documented in [docs/validation.md](docs/validation.md).
 
 ---
 
@@ -129,9 +148,10 @@ matrices with 512 bytes of pre-computed WHT signs.
 
 ---
 
-## Qwen Validation: Known Compatibility Issue
+## Qwen Compatibility
 
-Testing on Qwen-family models revealed anomalous perplexity results:
+Testing on Qwen-family models revealed anomalous perplexity results across all low-bit KV
+cache quantization methods:
 
 | Configuration | PPL |
 |---|---|
@@ -141,24 +161,26 @@ Testing on Qwen-family models revealed anomalous perplexity results:
 | turbo3 K + turbo3 V | 4098 |
 | turbo4 K + turbo4 V | 1658 |
 
-### Analysis
+### Current Evidence
 
-This is **not** a TurboQuant implementation bug. The evidence:
+The current evidence points to a model/quantizer compatibility issue rather than a TurboQuant
+implementation defect:
 
 - Plain `q4_0` KV quantization already fails dramatically (PPL = 531 vs 11.79 baseline).
-- The failure affects all low-bit KV quantization, not just TurboQuant.
-- The degradation is consistent across multiple quantization methods, indicating a
-  model-level sensitivity rather than a codec-specific issue.
+- The failure pattern is consistent across all low-bit quantizers tested — TurboQuant, q4_0,
+  and others degrade similarly on this model family.
+- Models that fail with q4_0 K also fail with turbo3 K and turbo4 K, suggesting the root
+  cause is in the data distribution, not the codec.
 
-### Likely Cause
-
-Qwen models exhibit large K activation outliers that cannot be represented by low-bit
-quantization. Standard MSE-optimal quantizers (including q4_0) also fail because the outliers
+**Likely cause**: Large K activation outliers that cannot be represented by low-bit
+quantization. Standard MSE-optimal quantizers (including q4_0) fail because the outliers
 dominate the quantization range, leaving insufficient precision for the remaining values.
 
-This is a known limitation of low-bit KV cache quantization on certain model families.
-Workaround: use `f16` or `q8_0` for K cache, or apply turbo types only to V cache
-(`--cache-type-v turbo3`) where the impact is less pronounced.
+> **Note**: This conclusion represents current evidence, not absolute fact. The investigation
+> remains open if new data emerges.
+
+**Workaround**: Use `f16` or `q8_0` for K cache, apply turbo types only to V cache
+(`--cache-type-v turbo3`).
 
 ---
 
@@ -197,6 +219,34 @@ KV Cache (per layer)
                            ▼
                       Inference
 ```
+
+---
+
+## Milestones
+
+### Completed
+
+| Milestone | Status |
+|---|---|
+| TurboQuant CPU correctness | ✅ |
+| TurboQuant CUDA correctness | ✅ |
+| CPU/CUDA mathematical equivalence audit | ✅ |
+| Llama validation (PPL within 0.4 for turbo4) | ✅ |
+| Initial ROCm portability audit | ✅ |
+
+### Upcoming
+
+| Milestone | Priority |
+|---|---|
+| Paged Attention Phase 2 (native paged FA) | P2 |
+| Explicit turbo4 NaN validation | P1 |
+| ROCm backend completion | P3 |
+| Large-scale benchmarks (multi-GPU, multi-model) | P2 |
+| Upstream synchronization | P3 |
+| Vulkan TurboQuant kernels | P3 |
+
+The project has transitioned from debugging the implementation to building new capabilities
+on a validated foundation.
 
 ---
 

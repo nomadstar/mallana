@@ -36,13 +36,33 @@ The `tests/test-turbo-quant.c` program tests the quantize-dequantize round trip:
 
 Metrics reported: MSE, cosine similarity, input norm, output norm.
 
-### CPU vs CUDA Consistency
+### CPU/CUDA Mathematical Consistency Audit
 
-The CPU and CUDA paths use identical WHT rotation (sign arrays + FWHT butterfly).
-Consistency is verified via:
-- Round-trip PPL measurements on the same model.
-- Head-to-head output comparison on short sequences.
-- Automated quality gate running on both backends.
+A complete audit of all CPU and CUDA TurboQuant paths was conducted to verify mathematical
+equivalence. Every contract between the two backends was checked independently:
+
+| Checked Item | Finding |
+|---|---|
+| WHT sign arrays | Identical values in CPU (`turbo_cpu_s1/s2`) and CUDA (`turbo_gpu_s1/s2`) |
+| WHT butterfly order | Identical stage ordering (1→2→4→...→64→128) |
+| WHT normalization | Identical `1/sqrt(d)` scaling after butterfly |
+| Turbo2 centroids | `{-0.133462, -0.039994, 0.039994, 0.133462}` — CPU and CUDA match |
+| Turbo3 centroids | 8 centroids from Lloyd-Max — CPU and CUDA match |
+| Turbo4 centroids | 16 centroids from Lloyd-Max — CPU and CUDA match |
+| Turbo2 packing | 2-bit indices packed 4 per byte — identical |
+| Turbo3 packing | 2-bit lo in `qs[]`, 1-bit hi in `signs[]` — identical |
+| Turbo4 packing | 4-bit nibble packed (default) — identical |
+| Norm correction | `corrected_norm = block_norm / recon_norm` — identical |
+| `vec_dot` contract | Dequant+dot accumulator semantics — correct |
+| InnerQ scaling contract | Per-channel RMS ratio application — correct |
+
+**Engineering verdict:**
+
+> No correctness-critical CPU/CUDA mathematical mismatches remain.
+
+This audit supersedes all prior concerns about backend divergence. The turbo4 dense-rotation
+bug (documented below) was the only systematic inconsistency, and its fix (commit `6457eac19`)
+fully restored mathematical equivalence.
 
 ### Reference Implementation
 
@@ -142,9 +162,14 @@ not just TurboQuant:
 | turbo3 K + turbo3 V | 4098 |
 | turbo4 K + turbo4 V | 1658 |
 
-**Root cause**: Large K activation outliers that cannot be represented by low-bit quantization.
-The degradation is uniform across q4_0, turbo3, and turbo4, confirming this is a model
-compatibility issue rather than a TurboQuant implementation bug.
+**Current evidence**: This appears to be a model/quantizer compatibility issue rather than a
+TurboQuant implementation defect. The key observation is that plain `q4_0` K quantization
+already fails dramatically on the same model, indicating the root cause lies in the data
+distribution rather than the codec. The likely mechanism is large K activation outliers that
+cannot be represented by any low-bit quantization scheme.
+
+> **Note**: This conclusion is based on current evidence. The investigation remains open
+> if new data emerges.
 
 **Workaround**: Use `f16` or `q8_0` for K cache, apply turbo types only to V cache.
 
@@ -180,3 +205,26 @@ The gate runs against Qwen3.5-35B-A3B-Q8_0 by default. To use a different model:
 ```bash
 MODEL=/path/to/model.gguf bash scripts/turbo-quality-gate.sh
 ```
+
+---
+
+## Validation Milestones
+
+### Complete
+
+| Milestone | Date |
+|---|---|
+| Round-trip quantization test | ✅ |
+| Automated quality gate | ✅ |
+| Llama-3.2-3B perplexity validation | ✅ |
+| CPU/CUDA mathematical equivalence audit | ✅ |
+| Qwen3.5-35B-A3B quality gate pass | ✅ |
+
+### Planned
+
+| Milestone | Target |
+|---|---|
+| Explicit turbo4 NaN validation | Priority P1 |
+| Multi-model validation suite (Gemma, Mistral, DeepSeek) | Priority P2 |
+| Cross-backend output bit-exactness test | Priority P2 |
+| Regression benchmark automation | Priority P2 |

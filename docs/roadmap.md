@@ -4,6 +4,33 @@
 
 ---
 
+## Milestones
+
+### Completed
+
+| Milestone | Status |
+|---|---|
+| TurboQuant CPU correctness | ✅ |
+| TurboQuant CUDA correctness | ✅ |
+| CPU/CUDA mathematical equivalence audit | ✅ |
+| Llama validation (PPL within 0.4 for turbo4) | ✅ |
+| Initial ROCm portability audit | ✅ |
+
+### Upcoming
+
+| Milestone | Priority |
+|---|---|
+| Paged Attention Phase 2 (native paged FA) | P2 |
+| Explicit turbo4 NaN validation | P1 |
+| ROCm backend completion | P3 |
+| Large-scale benchmarks (multi-GPU, multi-model) | P2 |
+| Upstream synchronization | P3 |
+
+The project has transitioned from debugging the implementation to building new capabilities
+on a validated foundation.
+
+---
+
 ## Priority Levels
 
 | Priority | Description |
@@ -103,17 +130,31 @@
 
 ---
 
-## Phase 4: Backend Portability (Pending)
+## Phase 4: Backend Portability (In Progress)
 
 | Task | Priority | Status |
 |---|---|---|
 | Vulkan TurboQuant quantize/dequantize shaders | P3 | ⬜ Pending |
-| Full HIP/ROCm turbo4 support | P3 | ⬜ Pending |
+| HIP/ROCm turbo4 support | P3 | 🔄 Prepared — <br/>low remaining effort |
 | HIP/ROCm ROCWMMA FA for turbo types | P3 | ⬜ Pending |
 | SYCL TurboQuant kernels | P3 | ⬜ Pending |
 | WebGPU TurboQuant kernels | P3 | ⬜ Pending |
 | CUDA block_size=128 validation for all GPUs | P2 | ⬜ Pending |
 | Multi-GPU paged attention | P3 | ⬜ Pending |
+
+### ROCm Portability Audit
+
+An initial portability audit has been completed. The architecture is already largely backend
+portable. Current blockers are minimal:
+
+- **API renames**: CUDA-specific API calls need HIP equivalents (e.g., `cudaMemcpy` → `hipMemcpy`).
+- **HIP compatibility wrappers**: The existing `ggml-cuda/vendors/hip.h` header handles most
+  of these, but some CUDA-isms remain in the turbo-specific code paths.
+- **Debug-only CUDA pointer inspection**: A small number of diagnostic code paths use
+  `cudaPointerGetAttributes` for debug logging, which has no direct HIP equivalent.
+
+The remaining effort to reach a functional HIP backend is relatively low, but completion
+has not yet been scheduled.
 
 ---
 
@@ -134,11 +175,15 @@
 
 ## Immediate Next Steps
 
-1. **Complete Paged Attention Phase 2**: Integrate page table lookup directly into the
+1. **Explicit turbo4 NaN validation**: Verify that turbo4 dequantization produces no NaN
+   or inf values under any valid input distribution. Priority P1.
+2. **Complete Paged Attention Phase 2**: Integrate page table lookup directly into the
    Flash Attention VEC kernel, eliminating the gather overhead.
-2. **Vulkan TurboQuant**: Implement compute shaders for turbo quantize/dequantize to
-   enable access on integrated GPUs.
-3. **Benchmark automation**: Create a systematic benchmark harness to track performance
-   across commits and configurations.
-4. **Expand validation**: Add more model families to the validation suite (Gemma, Mistral,
+3. **ROCm backend completion**: Resolve the minimal remaining API-compatibility blockers
+   to complete the HIP backend.
+4. **Large-scale benchmarks**: Systematic benchmark harness across multiple GPUs, model
+   sizes, and context lengths.
+5. **Upstream synchronization**: Rebase against latest `ggml-org/llama.cpp` master to
+   incorporate upstream fixes and features.
+6. **Expand validation**: Add more model families to the validation suite (Gemma, Mistral,
    DeepSeek).

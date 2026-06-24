@@ -6,6 +6,30 @@
 
 ## 2026-06
 
+### Mathematical consistency audit — CPU/CUDA equivalence verified
+
+**Scope**: Complete audit of all TurboQuant mathematical contracts between CPU and CUDA
+backends.
+
+**Verified items**:
+- WHT sign arrays (CPU `turbo_cpu_s1/s2` vs CUDA `turbo_gpu_s1/s2`): identical values.
+- WHT butterfly order: identical stage ordering.
+- Normalization factor (`1/sqrt(d)`): identical.
+- Turbo2/3/4 centroid tables: CPU and CUDA match exactly.
+- Turbo2/3/4 packing format: bit-level identical.
+- Turbo2/3/4 dequantization logic: identical.
+- Norm correction (`corrected_norm = block_norm / recon_norm`): identical.
+- `vec_dot` contract: dequant-and-dot accumulator semantics verified correct.
+- InnerQ scaling contract: per-channel RMS ratio application verified consistent.
+
+**Verdict**: No correctness-critical CPU/CUDA mathematical mismatches remain. The turbo4
+dense-rotation fix (`6457eac19`) restored full mathematical equivalence, and no other
+systematic inconsistencies were found.
+
+**Impact**: The project now operates on a validated mathematical foundation. All future
+development can assume CPU/CUDA numerical parity. This milestone closes the "debugging"
+phase of the project.
+
 ### `6457eac` — CPU turbo4 FWHT consistency fix
 
 **Problem**: CPU turbo4 quantization used dense random rotation matrices (128×128 Gaussian,
