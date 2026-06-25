@@ -257,7 +257,7 @@ static __global__ void flash_attn_ext_vec(
                 for (int k = 0; k < (D/2)/nthreads_KQ; ++k) {
                     Q_reg[j][k] *= scale_h2;
                 }
-#ifdef TURBO_DIAG_KQ
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
                 if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0 && j == 0) {
                     const float2 q0 = __half22float2(Q_reg[j][0]);
                     printf("TURBO_DIAG_KQ Q_preproc q0=%g q1=%g\n", q0.x, q0.y);
@@ -344,6 +344,13 @@ static __global__ void flash_attn_ext_vec(
                     }
                 } else {
                     sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
+                    if constexpr (type_K == GGML_TYPE_TURBO3_0) {
+                        if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0 && j == 0) {
+                            printf("TURBO_DIAG_KQ turbo3 sum k-only sum=%g\n", sum);
+                        }
+                    }
+#endif
                     sum = warp_reduce_sum<nthreads_KQ>(sum);
                 }
 
@@ -376,7 +383,7 @@ static __global__ void flash_attn_ext_vec(
             KQ_sum[j] = KQ_sum[j]*KQ_max_scale + KQ_reg[j];
             if constexpr (!V_is_turbo) { KQ[j*nthreads + tid] = KQ_reg[j]; }
 
-#ifdef TURBO_DIAG_KQ
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
             if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0 && j == 0) {
                 printf("TURBO_DIAG_KQ KQ_write j=%d val=%g max=%g sum=%g\n", j, KQ_reg[j], KQ_max[j], KQ_sum[j]);
             }

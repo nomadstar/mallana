@@ -327,13 +327,6 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
             const uint8_t   qs_byte  = K_turbo[ib].qs[j0 / 4];      // covers both j0 and j0+1
             const uint8_t   sgn_byte = K_turbo[ib].signs[j0 / 8];   // covers both j0 and j0+1
 
-#ifdef TURBO_DIAG_KQ
-            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-                printf("TURBO_DIAG_KQ turbo3 load ib=%d j0=%d norm=%g qs=0x%02x sgn=0x%02x\n",
-                       ib, j0, norm, (unsigned) qs_byte, (unsigned) sgn_byte);
-            }
-#endif
-
             // Extract 3-bit indices for elem0 and elem1 from shared bytes
             const int     shift  = (j0 % 4) * 2;                     // 0 or 4
             const uint8_t idx0   = ((qs_byte >> shift)     & 0x3) | (((sgn_byte >> (j0 % 8))     & 0x1) << 2);
@@ -351,14 +344,20 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
             sum += kv.x * qv.x + kv.y * qv.y;
 #endif // V_DOT2_F32_F16_AVAILABLE
 
-#ifdef TURBO_DIAG_KQ
-            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-                printf("TURBO_DIAG_KQ turbo3 sum k_KQ_0=%d k_KQ_1=%d sum=%g\n",
-                       k_KQ_0, k_KQ_1, sum);
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
+            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && k_KQ_0 == 0 && k_KQ_1 == 0) {
+                printf("TURBO_DIAG_KQ turbo3 first norm=%g qs_byte=0x%02x sgn_byte=0x%02x partial_sum=%g\n",
+                       norm, (unsigned) qs_byte, (unsigned) sgn_byte, sum);
             }
 #endif
         }
     }
+
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+        printf("TURBO_DIAG_KQ turbo3 final sum=%g\n", sum);
+    }
+#endif
 
     return sum;
 }
