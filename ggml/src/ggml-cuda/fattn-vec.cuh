@@ -146,8 +146,9 @@ static __global__ void flash_attn_ext_vec(
     // then the hot loop does turbo_lut[d][idx] (shmem read, no multiply).
     // turbo4 excluded: 16 centroids × D exceeds shmem budget.
     // Stride = n_centroids+1 to avoid bank conflicts.
-    constexpr int n_centroids_lut = (D <= 256 && type_K == GGML_TYPE_TURBO3_0) ? 8 :
-                                    (D <= 256 && type_K == GGML_TYPE_TURBO2_0) ? 4 : 0;
+    // Keep the turbo2 LUT path, but leave turbo3 on the original dot-product path.
+    // Turbo3 K-only correctness is the active regression under investigation.
+    constexpr int n_centroids_lut = (D <= 256 && type_K == GGML_TYPE_TURBO2_0) ? 4 : 0;
     constexpr int lut_stride = n_centroids_lut > 0 ? n_centroids_lut + 1 : 1;
     __shared__ half turbo_lut[n_centroids_lut > 0 ? D : 1][lut_stride];
 
@@ -315,27 +316,7 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
                 float sum;
-                if constexpr (n_centroids_lut > 0 && ncols == 1 && type_K == GGML_TYPE_TURBO3_0) {
-                    // LUT scoring: 8 elements per iteration (2 qs bytes + 1 signs byte)
-                    const block_turbo3_0 * K_turbo = (const block_turbo3_0 *)(K + i_KQ*nb11);
-                    sum = 0.0f;
-                    for (int d0 = 0; d0 < D; d0 += 8) {
-                        const int ib = d0 / QK_TURBO3;
-                        const int jj = d0 % QK_TURBO3;
-                        const float norm = __half2float(K_turbo[ib].norm);
-                        const uint8_t qs0 = K_turbo[ib].qs[jj / 4];
-                        const uint8_t qs1 = K_turbo[ib].qs[jj / 4 + 1];
-                        const uint8_t sgn = K_turbo[ib].signs[jj / 8];
-                        sum += (__half2float(turbo_lut[d0  ][((qs0>>0)&3)|((sgn>>0&1)<<2)]) +
-                                __half2float(turbo_lut[d0+1][((qs0>>2)&3)|((sgn>>1&1)<<2)]) +
-                                __half2float(turbo_lut[d0+2][((qs0>>4)&3)|((sgn>>2&1)<<2)]) +
-                                __half2float(turbo_lut[d0+3][((qs0>>6)&3)|((sgn>>3&1)<<2)]) +
-                                __half2float(turbo_lut[d0+4][((qs1>>0)&3)|((sgn>>4&1)<<2)]) +
-                                __half2float(turbo_lut[d0+5][((qs1>>2)&3)|((sgn>>5&1)<<2)]) +
-                                __half2float(turbo_lut[d0+6][((qs1>>4)&3)|((sgn>>6&1)<<2)]) +
-                                __half2float(turbo_lut[d0+7][((qs1>>6)&3)|((sgn>>7&1)<<2)])) * norm;
-                    }
-                } else if constexpr (n_centroids_lut > 0 && ncols == 1 && type_K == GGML_TYPE_TURBO2_0) {
+                if constexpr (n_centroids_lut > 0 && ncols == 1 && type_K == GGML_TYPE_TURBO2_0) {
                     // LUT scoring for turbo2: 8 elements per iteration (2 qs bytes, no signs)
                     const block_turbo2_0 * K_turbo = (const block_turbo2_0 *)(K + i_KQ*nb11);
                     sum = 0.0f;
