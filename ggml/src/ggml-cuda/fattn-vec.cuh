@@ -343,6 +343,13 @@ static __global__ void flash_attn_ext_vec(
                                 __half2float(turbo_lut[d0+7][(qs1>>6)&3])) * norm;
                     }
                 } else {
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
+                    if constexpr (type_K == GGML_TYPE_TURBO3_0) {
+                        if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0 && j == 0) {
+                            printf("TURBO3_K_DIAG_START flash_attn_ext_vec branch=turbo3 nthreads_KQ=%d\n", nthreads_KQ);
+                        }
+                    }
+#endif
                     sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
 #if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
                     if constexpr (type_K == GGML_TYPE_TURBO3_0) {

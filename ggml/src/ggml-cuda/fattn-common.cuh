@@ -310,6 +310,12 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0(
 
     float sum = 0.0f;
 
+#if defined(TURBO_DIAG_KQ) && defined(GGML_CUDA)
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+        printf("TURBO3_K_DIAG_START norm=%g\n", __half2float(K_turbo[0].norm));
+    }
+#endif
+
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < D/2; k_KQ_0 += nthreads*cpy_ne) {
 #pragma unroll
