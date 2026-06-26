@@ -870,6 +870,33 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
             }
         }
 
+#if defined(TURBO_DIAG_MMA_SOFTMAX_TILE_MAX)
+        if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && jt == 0) {
+            float ref_max = KQ_max[0];
+            int ref_max_kv = -1;
+            for (int kv = 0; kv < k_VKQ_sup; ++kv) {
+                float dot = 0.0f;
+                for (int d = 0; d < DKQ/2; ++d) {
+                    const float2 k = __half22float2(K_h2[int64_t(k_VKQ_0 + kv)*stride_K + d]);
+                    const float2 q = Q_f2[d];
+                    dot += k.x*q.x + k.y*q.y;
+                }
+                dot *= scale;
+                if (use_logit_softcap) {
+                    dot = logit_softcap*tanhf(dot);
+                }
+                dot += FATTN_KQ_MAX_OFFSET;
+                if (dot > ref_max) {
+                    ref_max = dot;
+                    ref_max_kv = k_VKQ_0 + kv;
+                }
+            }
+            printf("[TURBO_DIAG_MMA_SOFTMAX_TILE_MAX] block=(%d,%d,%d) jt=%d k0=%d k_sup=%d prev_max=%g ref_max=%g ref_kv=%d kernel_max_new=%g abs=%g cols_per_warp=%d np=%d\n",
+                   (int) blockIdx.x, (int) blockIdx.y, (int) blockIdx.z, jt, k_VKQ_0, k_VKQ_sup, KQ_max[0], ref_max, ref_max_kv,
+                   KQ_max_new[0], fabsf(ref_max - KQ_max_new[0]), cols_per_warp, np);
+        }
+#endif
+
         static_assert(nbatch_fa % (np*T_C_KQ::J) == 0, "bad loop size");
 #pragma unroll
         for (int k0 = 0; k0 < nbatch_fa; k0 += np*T_C_KQ::J) {
@@ -927,6 +954,93 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                (int) blockIdx.x, (int) blockIdx.y, (int) blockIdx.z, jt, k_VKQ_0, k_VKQ_sup,
                ref_max, KQ_max_new[0], fabsf(ref_max - KQ_max_new[0]),
                ref_rowsum, KQ_rowsum_add[0], fabsf(ref_rowsum - KQ_rowsum_add[0]), cols_per_warp, np);
+    }
+#endif
+
+#if defined(TURBO_DIAG_MMA_SOFTMAX_ARGMAX)
+    if (blockIdx.x == 0 && threadIdx.y == 0 && jt == 0 && k_VKQ_0 == 0) {
+        float thread_max = -FLT_MAX/2.0f;
+        int thread_max_kv = -1;
+        int thread_max_l = -1;
+
+        if constexpr (cols_per_warp == 8) {
+            static_assert(nbatch_fa % (np*T_C_KQ::I) == 0, "bad loop size");
+#pragma unroll
+            for (int k0 = 0; k0 < nbatch_fa; k0 += np*T_C_KQ::I) {
+#pragma unroll
+                for (int l = 0; l < T_C_KQ::ne; ++l) {
+                    const int kv = k0 + (threadIdx.y % np)*T_C_KQ::I + T_C_KQ::get_i(l);
+                    const int j = ((threadIdx.y / np)*T_C_KQ::J + T_C_KQ::get_j(l)) / ncols2;
+                    if (j == 0 && (!oob_check || kv < k_VKQ_sup)) {
+                        const float v = KQ_C[k0/(np*T_C_KQ::I)].x[l] + FATTN_KQ_MAX_OFFSET;
+                        if (v > thread_max) {
+                            thread_max = v;
+                            thread_max_kv = kv;
+                            thread_max_l = l;
+                        }
+                    }
+                }
+            }
+        } else {
+            static_assert(nbatch_fa % (np*T_C_KQ::J) == 0, "bad loop size");
+#pragma unroll
+            for (int k0 = 0; k0 < nbatch_fa; k0 += np*T_C_KQ::J) {
+#pragma unroll
+                for (int l = 0; l < T_C_KQ::ne; ++l) {
+                    const int kv = k0 + (threadIdx.y % np)*T_C_KQ::J + T_C_KQ::get_j(l);
+                    const int j = ((threadIdx.y / np)*cols_per_warp + T_C_KQ::get_i(l)) / ncols2;
+                    if (j == 0 && (!oob_check || kv < k_VKQ_sup)) {
+                        const float v = KQ_C[k0/(np*T_C_KQ::J)].x[l] + FATTN_KQ_MAX_OFFSET;
+                        if (v > thread_max) {
+                            thread_max = v;
+                            thread_max_kv = kv;
+                            thread_max_l = l;
+                        }
+                    }
+                }
+            }
+        }
+
+        float warp_max = thread_max;
+        int warp_max_kv = thread_max_kv;
+        int warp_max_lane = threadIdx.x;
+#pragma unroll
+        for (int offset = warp_size/2; offset >= 1; offset >>= 1) {
+            const float other_max = __shfl_xor_sync(0xFFFFFFFF, warp_max, offset, warp_size);
+            const int other_kv = __shfl_xor_sync(0xFFFFFFFF, warp_max_kv, offset, warp_size);
+            const int other_lane = __shfl_xor_sync(0xFFFFFFFF, warp_max_lane, offset, warp_size);
+            if (other_max > warp_max) {
+                warp_max = other_max;
+                warp_max_kv = other_kv;
+                warp_max_lane = other_lane;
+            }
+        }
+
+        if (threadIdx.x == 0) {
+            float ref_max = -FLT_MAX/2.0f;
+            int ref_max_kv = -1;
+            for (int kv = 0; kv < k_VKQ_sup; ++kv) {
+                float dot = 0.0f;
+                for (int d = 0; d < DKQ/2; ++d) {
+                    const float2 k = __half22float2(K_h2[int64_t(kv)*stride_K + d]);
+                    const float2 q = Q_f2[d];
+                    dot += k.x*q.x + k.y*q.y;
+                }
+                dot *= scale;
+                if (use_logit_softcap) {
+                    dot = logit_softcap*tanhf(dot);
+                }
+                dot += FATTN_KQ_MAX_OFFSET;
+                if (dot > ref_max) {
+                    ref_max = dot;
+                    ref_max_kv = kv;
+                }
+            }
+            printf("[TURBO_DIAG_MMA_SOFTMAX_ARGMAX] block=(%d,%d,%d) k_sup=%d ref_max=%g ref_kv=%d warp_max=%g warp_kv=%d warp_lane=%d thread0_max=%g thread0_kv=%d thread0_l=%d cols_per_warp=%d np=%d T_C_KQ=(%d,%d,%d)\n",
+                   (int) blockIdx.x, (int) blockIdx.y, (int) blockIdx.z, k_VKQ_sup,
+                   ref_max, ref_max_kv, warp_max, warp_max_kv, warp_max_lane,
+                   thread_max, thread_max_kv, thread_max_l, cols_per_warp, np, T_C_KQ::I, T_C_KQ::J, T_C_KQ::ne);
+        }
     }
 #endif
 
@@ -1391,6 +1505,45 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
             }
         }
     }
+
+#if defined(TURBO_DIAG_MMA_SOFTMAX_REDUCED)
+    if (np == 1 && blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && jt == 0) {
+        float ref_max = -FLT_MAX/2.0f;
+        for (int kv = 0; kv < ne11; ++kv) {
+            float dot = 0.0f;
+            for (int d = 0; d < DKQ/2; ++d) {
+                const float2 k = __half22float2(K_h2[int64_t(kv)*stride_K + d]);
+                const float2 q = Q_f2[d];
+                dot += k.x*q.x + k.y*q.y;
+            }
+            dot *= scale;
+            if (use_logit_softcap) {
+                dot = logit_softcap*tanhf(dot);
+            }
+            ref_max = fmaxf(ref_max, dot + FATTN_KQ_MAX_OFFSET);
+        }
+
+        float ref_rowsum = 0.0f;
+        for (int kv = 0; kv < ne11; ++kv) {
+            float dot = 0.0f;
+            for (int d = 0; d < DKQ/2; ++d) {
+                const float2 k = __half22float2(K_h2[int64_t(kv)*stride_K + d]);
+                const float2 q = Q_f2[d];
+                dot += k.x*q.x + k.y*q.y;
+            }
+            dot *= scale;
+            if (use_logit_softcap) {
+                dot = logit_softcap*tanhf(dot);
+            }
+            ref_rowsum += expf(dot - ref_max);
+        }
+
+        printf("[TURBO_DIAG_MMA_SOFTMAX_REDUCED] layer_block=(%d,%d,%d) jt=%d ne11=%d ref_max=%g kernel_max=%g max_abs=%g ref_rowsum=%g kernel_rowsum=%g rowsum_abs=%g cols_per_warp=%d np=%d\n",
+               (int) blockIdx.x, (int) blockIdx.y, (int) blockIdx.z, jt, ne11,
+               ref_max, KQ_max[0], fabsf(ref_max - KQ_max[0]),
+               ref_rowsum, KQ_rowsum[0], fabsf(ref_rowsum - KQ_rowsum[0]), cols_per_warp, np);
+    }
+#endif
 
     // If attention sinks are used, potentially re-scale if KQ_max is small.
     // Also add the sink as a value to KQ_rowsum, this is done after synchronization of KQ_rowsum
