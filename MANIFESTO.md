@@ -214,19 +214,17 @@ This project also investigates a second problem:
 
 > **Can AI systems collaborate to accelerate systems research while remaining under human supervision?**
 
-Rather than replacing engineering judgment, AI is treated as an engineering tool.
+Rather than replacing engineering judgment, AI is treated as an engineering tool. 
 
-Different AI systems may specialize in:
+To make this collaboration repeatable and rigorous, this repository implements a structured **Research Automation Framework (Research OS)**. The framework separates responsibilities across specialized AI roles (Architect, Implementer, Validator, Reviewer) and anchors progress in immutable milestone logs under the `/research` directory.
 
-* architecture
-* implementation
-* debugging
-* validation
-* benchmarking
-* documentation
-* code review
+Different AI systems specialize in their respective roles:
+- **Architect**: Designs experiments, models physical/mathematical hypotheses, and sets explicit validation and rollback criteria.
+- **Implementer**: Applies minimal, scoped code patches without ad-hoc optimization or unilateral design changes.
+- **Validator**: Runs builds, benchmarks, and perplexity gates to verify improvements against the baseline, producing objective binary veredictoes.
+- **Reviewer**: Audits designs and implementations as the "devil's advocate," attempting to actively refute the architect's hypothesis.
 
-while a human researcher remains responsible for scientific direction and final decisions.
+This structured workflow is detailed in [RESEARCH.md](file:///home/ignatus/GitHub/llama-cpp-turboquant/RESEARCH.md) and governed by the prompts in `/prompts` and automation tools in `/scripts`. Through this framework, the human researcher remains responsible for scientific direction, vetoes, and final approval, while AI systems execute the iterative lifecycle.
 
 ---
 

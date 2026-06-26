@@ -301,6 +301,8 @@ on a validated foundation.
 
 | Document | Description |
 |---|---|
+| [Manifesto](MANIFESTO.md) | General vision, optimization principles, and targets |
+| [Research Automation](RESEARCH.md) | Research OS framework, roles, and automated workflows |
 | [Architecture](docs/architecture.md) | High-level architecture and component relationships |
 | [TurboQuant](docs/turboquant.md) | Detailed TurboQuant algorithm and implementation |
 | [Paged Attention](docs/paged-attention.md) | Paged Attention design and implementation plan |
@@ -308,6 +310,19 @@ on a validated foundation.
 | [Benchmarks](docs/benchmarks.md) | Quality, performance, and memory benchmarks |
 | [Roadmap](docs/roadmap.md) | Detailed milestones and priorities |
 | [Changelog](docs/changelog.md) | Engineering changelog |
+
+---
+
+## Research Automation (Research OS)
+
+This repository features an integrated **Research OS** designed to coordinate human-supervised AI collaboration. If you are an AI assistant working on this repository:
+
+1. **Get Up to Speed**: Run the resume script to display the research dashboard:
+   ```bash
+   bash scripts/resume.sh
+   ```
+2. **Consult Roles & Rules**: See [RESEARCH.md](RESEARCH.md) for execution workflows and find role-specific instructions under `prompts/`.
+3. **Execute Safely**: Make minimal changes based on the active milestone in `research/state.md`. Verify them using `bash scripts/validate.sh` and benchmark using `bash scripts/benchmark.sh`.
 
 ---
 
