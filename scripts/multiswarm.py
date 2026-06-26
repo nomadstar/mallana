@@ -72,6 +72,7 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
     """
     process = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=0,
@@ -181,8 +182,8 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
         print(f"{RED}Architect planning failed with return code {res.returncode}.{RESET}")
         return False
 
-def run_implementation(task, iteration, model=None, skip_permissions=False, resume=False):
-    """Phase 2: Implementer (claude) writes code changes based on the plan."""
+def run_implementation(task, iteration, model=None, skip_permissions=False, resume=False, implementer="claude"):
+    """Phase 2: Implementer writes code changes based on the plan."""
     if not os.path.exists(PLAN_FILE):
         print(f"{RED}Error: Plan file '{PLAN_FILE}' not found!{RESET}")
         return False
@@ -196,7 +197,7 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
             critique_content = f.read()
 
     prompt = (
-        f"You are the IMPLEMENTER (Claude Code). Your task is to execute the implementation plan.\n"
+        f"You are the IMPLEMENTER ({implementer}). Your task is to execute the implementation plan.\n"
         f"Here is the plan:\n"
         f"```markdown\n{plan_content}\n```\n"
     )
@@ -212,7 +213,13 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
         f"to '{SUMMARY_FILE}' (e.g. 'Modified src/main.cpp to support X')."
     )
 
-    cmd = ["claude"]
+    # agy uses --prompt; claude uses --print
+    if implementer == "agy":
+        prompt_flag = "--prompt"
+    else:
+        prompt_flag = "--print"
+
+    cmd = [implementer]
     if skip_permissions:
         cmd.append("--dangerously-skip-permissions")
     if model:
@@ -220,9 +227,9 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
     if resume and iteration > 1:
         cmd.append("--continue")
 
-    cmd.extend(["--print", prompt])
+    cmd.extend([prompt_flag, prompt])
 
-    print(f"\n{BOLD}{CYAN}=== Phase 2: Implementation with Implementer (claude) ==={RESET}")
+    print(f"\n{BOLD}{CYAN}=== Phase 2: Implementation with Implementer ({implementer}) ==={RESET}")
     print(f"Executing: {format_cmd_display(cmd)}")
     log_session(f"Starting implementation phase, iteration {iteration}")
 
@@ -349,8 +356,11 @@ def main():
     parser.add_argument("--continue-session", action="store_true", help="Continue previous CLI sessions if possible")
     parser.add_argument("--use-plan", action="store_true", help="Use existing .multiswarm_plan.md without running Architect planning")
     parser.add_argument("--force-use-plan", action="store_true", help="Use existing plan even if its task field does not match --task")
+    parser.add_argument("--implementer", default="claude", choices=["claude", "agy"],
+                        help="Tool used as implementer in Phase 2 (default: claude)")
     parser.add_argument("--model-agy", help="Model override for agy")
-    parser.add_argument("--model-claude", help="Model override for claude")
+    parser.add_argument("--model-claude", help="Model override for claude (ignored when --implementer=agy)")
+    parser.add_argument("--model-implementer", help="Model override for the implementer tool (takes precedence over --model-claude)")
     parser.add_argument("--model-opencode", help="Model override for opencode")
     parser.add_argument("--agent-opencode", help="Custom agent for opencode")
     parser.add_argument("--cleanup", action="store_true", help="Delete temporary multiswarm files on completion")
@@ -372,6 +382,7 @@ def main():
     print(f"{BOLD}{GREEN}================================================================{RESET}")
     print(f"Task: {args.task}")
     print(f"Max Iterations: {args.iterations}")
+    print(f"Roles: Architect=agy | Implementer={args.implementer} | Critic=opencode")
     print(f"Skip Permissions: {args.skip_permissions}")
     print(f"Interactive Confirmation: {not args.no_interactive}")
     print(f"{BOLD}{GREEN}================================================================{RESET}\n")
@@ -454,7 +465,8 @@ def main():
                 break
 
         # Step 2: Implementation
-        if not run_implementation(args.task, iteration, args.model_claude, args.skip_permissions, args.continue_session):
+        impl_model = args.model_implementer or (None if args.implementer == "agy" else args.model_claude)
+        if not run_implementation(args.task, iteration, impl_model, args.skip_permissions, args.continue_session, args.implementer):
             print(f"{RED}Implementation failed in iteration {iteration}. Aborting.{RESET}")
             break
 

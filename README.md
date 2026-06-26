@@ -50,7 +50,8 @@ unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 | Flash Attention Integration | ✅ Stable |
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
 | Quality Gate (automated PPL + speed) | ✅ Operational |
-| Paged Attention (Phase 1) | 🚧 In Progress |
+| Paged Attention (Phase 1) | ✅ Functional |
+| Paged Attention (Phase 2) | 🚧 Code Complete — Pending Validation |
 | TriAttention | 🚧 In Progress |
 | ROCm / HIP Portability Audit | ✅ Complete — Prepared |
 | Metal Support | ✅ Stable |
@@ -275,8 +276,8 @@ on a validated foundation.
 
 ### Phase 3 — Paged Attention (In Progress)
 
-- [ ] Phase 1: Gather-before-FA with dynamic page allocation (✅ Functional)
-- [ ] Phase 2: Native paged FA (page-table-lookup in kernel)
+- [x] Phase 1: Gather-before-FA with dynamic page allocation (✅ Functional)
+- [x] Phase 2: Native paged FA (page-table-lookup in kernel) (🚧 Pending Validation)
 - [ ] Phase 3: TurboQuant-aware block alignment
 - [ ] Sliding window support
 - [ ] Continuous batching

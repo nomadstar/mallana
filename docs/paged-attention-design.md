@@ -210,21 +210,35 @@ kqv      = ggml_flash_attn_ext(ctx, q, k, v, mask, ...)
 5. Add dynamic allocation: pop from `free_blocks` on new page; return on `seq_rm`.
 6. Test with multiple sequences to verify page reuse.
 
-### Phase 2 — Performance (native paged FA)
+### Phase 2 — Performance (native paged FA) — Implemented
 
-Replace gather+FA with a single kernel. In `fattn-vec.cuh`, change:
+**Status:** Code complete. Awaits numerical validation.
+
+Replace gather+FA with a single kernel. In `fattn-vec.cuh`, the hot loop now calls:
+
 ```cuda
-// Old:
-dequantize_V(V + k*nb21, tmp, i);
-
-// New:
-int page_idx = (tile_start + k) / block_size;
-int in_page  = (tile_start + k) % block_size;
-const char* V_page = V_base + (int64_t)page_table[page_idx] * page_size_bytes;
-dequantize_V(V_page + in_page*nb21, tmp, i);
+dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp, ...);
 ```
 
-Requires new parameters to `launch_fattn()`: `const int32_t* page_table, int block_size`.
+Where `v_paged_ptr()` (defined in `fattn-common.cuh`) computes:
+
+```cuda
+lpage  = k_abs / bs;
+within = k_abs % bs;
+pblock = v_ptable[seq * n0 + lpage];
+return V_base + ((int64_t)pblock * bs + within) * nb21;
+```
+
+**New parameters to `launch_fattn()`:** `const int32_t* v_ptable_data, int32_t v_ptable_ne0, int32_t v_block_size`.
+
+**Graph integration:** When flash_attn + paging are active, `src/llama-graph.cpp` builds a
+4D view of the flat V pool (`ggml_view_4d`) and attaches the page table via
+`ggml_flash_attn_ext_set_page_table(kqv, page_table)` which stores it in `kqv->src[5]`.
+The `launch_fattn()` entry point reads `dst->src[5]` to retrieve the page table data.
+
+**Stride invariant:** The 4D view uses strides that, after `ggml_permute(0, 2, 1, 3)`,
+yield `nb21 = n_embd_v × ts` (correct stride between physical pool rows) and
+`nb22 = head_v_eff × ts` (correct stride between heads within a row).
 
 ### Phase 3 — TurboQuant-Aware Paged Blocks
 
@@ -244,9 +258,14 @@ is a multiple of `QK_TURBO3=32` for alignment: 32 or 64 recommended.
 | `ggml/src/ggml-cuda/paged-gather.cu` (new) | `GGML_OP_GATHER_PAGED_V` CUDA kernel + CPU fallback | Medium | 1 |
 | `ggml/src/ggml.h` + `ggml.c` | Register new op type | Low | 1 |
 | `src/llama-context.h` / `.cpp` | Forwarders for new `get_v_paged` interface | Low | 1 |
-| `ggml/src/ggml-cuda/fattn-common.cuh` | Add `page_table`/`block_size` to `launch_fattn()` | High | 2 |
-| `ggml/src/ggml-cuda/fattn-vec.cuh` | Replace `V + k*nb21` with paged pointer | High | 2 |
+| `ggml/include/ggml.h` | `ggml_flash_attn_ext_set_page_table()` declaration | Low | 2 |
+| `ggml/src/ggml.c` | `ggml_flash_attn_ext_set_page_table()` implementation | Low | 2 |
+| `ggml/src/ggml-cuda/fattn-common.cuh` | Add `v_ptable`/`v_ptable_ne0`/`v_block_size` to `fattn_kernel_t` and `launch_fattn()`; `v_paged_ptr()` helper | High | 2 |
+| `ggml/src/ggml-cuda/fattn-vec.cuh` | Replace `V + k*nb21` with `v_paged_ptr()` | High | 2 |
 | `ggml/src/ggml-cuda/fattn-tile.cuh` | Same paged pointer change | High | 2 |
+| `ggml/src/ggml-cuda/fattn-mma-f16.cuh` | ABI compat: accept new params, mark GGML_UNUSED | Low | 2 |
+| `ggml/src/ggml-cuda/fattn-wmma-f16.cu` | ABI compat stub | Low | 2 |
+| `src/llama-graph.cpp` | Phase 2 graph branch: 4D view + skip gather + `set_page_table` | Medium | 2 |
 | `include/llama.h` | No changes | None | — |
 | `ggml-cuda/set-rows.cu` | No changes | None | — |
 
@@ -256,15 +275,24 @@ is a multiple of `QK_TURBO3=32` for alignment: 32 or 64 recommended.
 
 **Is minimal PagedAttention compatible with TurboQuant + FlashAttention?**
 
-**Yes.** Phase 1 (gather-before-FA) requires:
+**Yes.** Phase 1 (gather-before-FA) required:
 - No changes to any CUDA kernel in `fattn-vec.cuh`, `fattn-common.cuh`, or `set-rows.cu`
 - One new trivial gather kernel (~50 lines CUDA)
 - C++-only changes to index computation and tensor layout
 
-The existing TurboQuant zero-padding, WHT rotation, and block encoding are all orthogonal
-to paging and require zero modification.
+Phase 2 (native paged FA) extends the approach:
+- Adds `v_paged_ptr()` device helper shared by VEC and TILE kernels
+- Extends all kernel signatures with 3 new page-table parameters
+- Plumbs page table through `dst->src[5]` via `ggml_flash_attn_ext_set_page_table()`
+- Replaces gather + FA with a single kernel call per layer
+- Leaves MMA-f16 and WMMA-f16 kernels unchanged (ABI compat stubs)
 
-**Smallest working unit**: Steps 1–4 of the Phase 1 validation sequence above produce a
-functionally correct system with identity page tables. Step 5 adds actual dynamic
-allocation. The whole Phase 1 can be implemented and validated without touching a single
-existing CUDA kernel.
+The existing TurboQuant zero-padding, WHT rotation, and block encoding remain orthogonal
+to paging and required zero modification.
+
+**Validation note:** Phase 2 code compiles but awaits numerical parity testing against
+Phase 1 and the non-paged baseline.
+
+**Smallest working unit**: Steps 1–4 of the Phase 1 validation sequence produce a
+functionally correct system with identity page tables. Phase 2 builds on this foundation,
+eliminating the gather step entirely.

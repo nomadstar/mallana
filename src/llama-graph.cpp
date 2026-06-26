@@ -2110,7 +2110,6 @@ ggml_tensor * llm_graph_context::build_attn(
 #endif
     ggml_tensor * v;
     if (inp->self_v_page_table) {
-        // PagedAttention Phase 1: gather V rows via page table before FA
         ggml_tensor * v_pool   = mctx_cur->get_v_paged(ctx0, il);
         ggml_tensor * v_ptable = inp->self_v_page_table;
 
@@ -2118,19 +2117,36 @@ ggml_tensor * llm_graph_context::build_attn(
         int32_t bs;
         memcpy(&bs, v_ptable->op_params, sizeof(int32_t));
 
-        v = ggml_gather_paged_v(ctx0, v_pool, v_ptable, n_kv_val, bs);
-
-        // Reshape gathered [n_embd_v_gqa, n_kv, ns] into [head_v_eff, n_head_kv, n_kv, ns] for FA
-        const int64_t n_embd_v  = v_pool->ne[0];
-        const int64_t n_head_kv = (int64_t) hparams.n_head_kv(il);
-        const int64_t head_v_eff = n_embd_v / n_head_kv;
-        const int64_t ns        = v_ptable->ne[1];
-        v = ggml_view_4d(ctx0, v,
-                head_v_eff, n_head_kv, n_kv_val, ns,
-                ggml_row_size(v->type, head_v_eff),
-                ggml_row_size(v->type, n_embd_v),
-                ggml_row_size(v->type, n_embd_v * n_kv_val),
-                0);
+        if (cparams.flash_attn) {
+            // Phase 2: native paged FA — skip gather, pass pool + page table directly.
+            // Pool shape: [n_embd_v, n_total_physical_slots]
+            // FA expects V as 4D: [head_v_eff, n_head_kv, n_kv_logical, n_seq]
+            // We create a 4D view of the pool with n_kv_logical rows (logical addressing).
+            // The kernel resolves physical rows via the page table.
+            const int64_t n_embd_v   = v_pool->ne[0];
+            const int64_t n_head_kv  = (int64_t) hparams.n_head_kv(il);
+            const int64_t head_v_eff = n_embd_v / n_head_kv;
+            const int64_t ns         = v_ptable->ne[1];
+            v = ggml_view_4d(ctx0, v_pool,
+                    head_v_eff, n_head_kv, n_kv_val, ns,
+                    ggml_row_size(v_pool->type, head_v_eff),
+                    ggml_row_size(v_pool->type, n_embd_v),
+                    ggml_row_size(v_pool->type, n_embd_v) * (int64_t)n_kv_val,
+                    0);
+        } else {
+            // Phase 1 fallback (non-FA path): materialise V contiguously via gather.
+            v = ggml_gather_paged_v(ctx0, v_pool, v_ptable, n_kv_val, bs);
+            const int64_t n_embd_v   = v_pool->ne[0];
+            const int64_t n_head_kv  = (int64_t) hparams.n_head_kv(il);
+            const int64_t head_v_eff = n_embd_v / n_head_kv;
+            const int64_t ns         = v_ptable->ne[1];
+            v = ggml_view_4d(ctx0, v,
+                    head_v_eff, n_head_kv, n_kv_val, ns,
+                    ggml_row_size(v->type, head_v_eff),
+                    ggml_row_size(v->type, n_embd_v),
+                    ggml_row_size(v->type, n_embd_v * n_kv_val),
+                    0);
+        }
     } else {
         v = mctx_cur->get_v(ctx0, il);
     }
@@ -2149,6 +2165,9 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    if (inp->self_v_page_table && cparams.flash_attn) {
+        ggml_flash_attn_ext_set_page_table(cur, inp->self_v_page_table);
+    }
     cb(cur, "kqv_out", il);
 
     // TurboQuant: if V was padded, the output has padded dimensions.

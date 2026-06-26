@@ -35,13 +35,54 @@ contiguous buffer before Flash Attention executes.
   so FA sees no difference from the legacy path.
 - **Minimal new CUDA code** — The gather kernel is approximately 50 lines of CUDA.
 
-**Current capabilities:**
+**Capabilities:**
 
 - Dynamic page allocation from a free-block pool.
 - Page table indirection for V reads.
 - Lazy allocation on first write.
 - CPU fallback for `GATHER_PAGED_V`.
 - `LLAMA_NO_PAGING` env var to disable.
+
+### Phase 2 — Native Paged FA (Implemented)
+
+Phase 2 eliminates the intermediate gather kernel by integrating page table lookup directly
+inside the Flash Attention kernels (`fattn-vec.cuh`, `fattn-tile.cuh`). Instead of
+materializing a contiguous V buffer, the kernel receives:
+
+- The flat V pool pointer (same physical storage as Phase 1)
+- The page table tensor via `dst->src[5]`
+
+A new `v_paged_ptr()` device helper (defined in `fattn-common.cuh`) translates a logical
+KV position `(seq, k_abs)` to a physical address:
+
+```cuda
+lpage  = k_abs / block_size;
+within = k_abs % block_size;
+pblock = page_table[seq * n_lpages + lpage];
+return V_base + (pblock * block_size + within) * nb21;
+```
+
+**Kernel changes:**
+
+- All `V + k*nb21` accesses replaced with `v_paged_ptr(V_paged_base, nb21, ...)` calls.
+- V pointer no longer advances by `nb23*sequence` (pool has no per-sequence stride) nor by
+  `blockIdx.y * nthreads * nb21` in the k-loop (page table handles positioning).
+- Kernel signature extended with 3 new params: `v_ptable`, `v_ptable_ne0`, `v_block_size`.
+
+**Graph changes (`src/llama-graph.cpp`):**
+
+When `cparams.flash_attn && inp->self_v_page_table`:
+1. Creates a 4D view of the flat V pool (shape `[head_v_eff, n_head_kv, n_kv_val, ns]`)
+   with strides matching the pool layout.
+2. Skips the `ggml_gather_paged_v` call entirely.
+3. Calls `ggml_flash_attn_ext_set_page_table(cur, page_table)` after `build_attn_mha` to
+   attach the page table to `dst->src[5]`.
+
+**ABI compat stubs:** `fattn-mma-f16.cuh` and `fattn-wmma-f16.cu` accept the 3 new params
+but mark them `GGML_UNUSED` — only the VEC and TILE kernels implement paged access.
+
+**Performance target (not yet validated):** 10–15% latency reduction for sequences >8K tokens
+by eliminating gather's global-memory write + read.
 
 ---
 
@@ -88,7 +129,7 @@ set_input_v_idxs:
 
 The `ggml_set_rows` CUDA kernel sees a flat row index — no kernel changes needed.
 
-### Read Path
+### Read Path (Phase 1)
 
 ```
 v_pool   = get_v_paged(ctx, il)                 // block pool tensor
@@ -97,21 +138,59 @@ v        = ggml_gather_paged(ctx, v_pool, v_ptable, n_kv, block_size)
 kqv      = ggml_flash_attn_ext(ctx, q, k, v, mask, ...)
 ```
 
-### Gather Kernel
+### Read Path (Phase 2)
+
+```
+v_pool   = get_v_paged(ctx, il)                 // block pool tensor (flat 2D)
+v_ptable = build_input_v_page_table(ctx, ...)   // INT32 page table tensor
+v        = ggml_view_4d(ctx, v_pool, ...)       // 4D view of pool (no gather)
+// ... ggml_permute(v, 0, 2, 1, 3) inside build_attn_mha ...
+kqv      = ggml_flash_attn_ext(ctx, q, k, v, mask, ...)
+ggml_flash_attn_ext_set_page_table(kqv, v_ptable)  // attach table to dst->src[5]
+```
+
+### `v_paged_ptr()` Device Helper
 
 ```cuda
-// For each output row r in [0, n_kv):
-int page    = r / block_size;
-int off     = r % block_size;
-int pblock  = page_table[page];
-memcpy(out + r * row_stride,
-       pool + (pblock * block_size + off) * row_stride,
-       row_bytes);
+static __device__ __forceinline__ const char * v_paged_ptr(
+        const char * __restrict__ V_base,
+        const int64_t             nb21,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t             seq,
+        const int32_t             n0,
+        const int32_t             bs,
+        const int32_t             k_abs) {
+    if (v_ptable) {
+        const int32_t lpage  = k_abs / bs;
+        const int32_t within = k_abs % bs;
+        const int32_t pblock = v_ptable[seq * n0 + lpage];
+        return V_base + ((int64_t)pblock * bs + within) * nb21;
+    }
+    return V_base + (int64_t)k_abs * nb21;
+}
 ```
+
+`nb21` = stride per physical slot in the pool (`n_embd_v × element_size`).
+After `ggml_permute(V, 0, 2, 1, 3)`, the kernel receives `nb21 = n_embd_v × ts` — the
+correct stride to index consecutive physical pool rows.
+
+### 4D View Strides
+
+The 4D pool view is created with shape `[head_v_eff, n_head_kv, n_kv_val, ns]` and strides
+that, after `ggml_permute(0, 2, 1, 3)`, produce the correct geometry:
+
+| Stride | Pre-permute | Post-permute | Purpose |
+|--------|-------------|--------------|---------|
+| `nb0`  | `ts` (inherited) | `ts` | element stride |
+| `nb1`  | `head_v_eff · ts` | `n_embd_v · ts` (= `nb21`) | token stride (kernel iterates KV positions) |
+| `nb2`  | `n_embd_v · ts` | `head_v_eff · ts` (= `nb22`) | head stride (kernel offsets per head group) |
+| `nb3`  | `n_embd_v · n_kv_val · ts` | `0` (paged: no per-seq stride) | sequence stride |
 
 ---
 
 ## Graph Integration
+
+### Phase 1 (gather)
 
 ```
 q_cur ──►
@@ -119,6 +198,16 @@ k_cur ──► cpy_k ──► get_k ──►
 v_cur ──► cpy_v ──► V pool ──► gather_paged_v ──► reshape ──► flash_attn_ext
                       ▲
 page_table ───────────┘
+```
+
+### Phase 2 (native paged FA)
+
+```
+q_cur ──►
+k_cur ──► cpy_k ──► get_k ──►
+v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ──► flash_attn_ext ◄── set_page_table
+                      │                                              ▲
+                      └─── page_table ──── build_input_v_page_table ──┘
 ```
 
 ---
@@ -133,22 +222,30 @@ page_table ───────────┘
 
 ---
 
-## Known Limitations (Phase 1)
+## Known Limitations
 
-1. **Gather overhead** — The gather kernel adds O(n_kv) memory traffic per layer per forward
-   pass. This will be eliminated in Phase 2 by integrating page table lookup into the FA kernel.
+1. **Gather overhead (Phase 1 only)** — Phase 1 gather adds O(n_kv) memory traffic.
+   **Eliminated in Phase 2** via native FA integration.
 
 2. **No ref-counting** — `seq_rm()` scans all cells in a page range and only frees the
-   physical block if every cell is empty. Explicit ref-counting is planned for Phase 2.
+   physical block if every cell is empty. Explicit ref-counting is planned.
 
 3. **No prefix sharing** — Multiple sequences with shared prefixes cannot share physical
-   blocks. Planned for Phase 2.
+   blocks. Planned.
 
-4. **K cache not paged** — Only V uses paged allocation. Paging K is deferred to a later
-   phase due to the additional complexity in the KQ dot product path.
+4. **K cache not paged** — Only V uses paged allocation. Paging K is deferred due to
+   the additional complexity in the KQ dot product path.
 
 5. **Block-size hard-coded** — Currently fixed at 32 tokens. Dynamic block size selection
    could optimize for different sequence lengths.
+
+6. **Phase 2 not numerically validated** — The code compiles and links, but numerical
+   parity against Phase 1 and the non-paged baseline has not been confirmed. Pending
+   validation before merging.
+
+7. **4D view stride correctness** — The `ggml_view_4d` strides for the paged pool are
+   designed to produce correct `nb21`/`nb22` values after `ggml_permute(0,2,1,3)`. Any
+   change to the view creation or permute order must re-verify kernel stride invariants.
 
 ---
 
@@ -167,11 +264,19 @@ page_table ───────────┘
 | 7 | CPU fallback for gather | ✅ |
 | 8 | Paging disable gate (`LLAMA_NO_PAGING`) | ✅ |
 
-### Phase 2 — Native Paged FA (Planned)
+### Phase 2 — Native Paged FA (Implemented)
 
-- Replace gather + FA with a single kernel that looks up page table entries on the fly.
-- New parameters to `launch_fattn()`: `const int32_t* page_table, int block_size`.
-- In `fattn-vec.cuh`, replace `V + k*nb21` with `V_page + in_page*nb21`.
+| Step | Description | Status |
+|---|---|---|
+| 1 | Extend `fattn_kernel_t` with `v_ptable`, `v_ptable_ne0`, `v_block_size` params | ✅ |
+| 2 | Implement `v_paged_ptr()` device helper in `fattn-common.cuh` | ✅ |
+| 3 | Wire `launch_fattn()` to read `dst->src[5]` and pass page table to kernel | ✅ |
+| 4 | Replace `V + k*nb21` with `v_paged_ptr()` in `fattn-vec.cuh` | ✅ |
+| 5 | Same replacement in `fattn-tile.cuh` | ✅ |
+| 6 | ABI compat stubs for `fattn-mma-f16.cuh` and `fattn-wmma-f16.cu` | ✅ |
+| 7 | Add `ggml_flash_attn_ext_set_page_table()` API | ✅ |
+| 8 | Wire graph to skip gather and create 4D pool view when FA + paging active | ✅ |
+| 9 | Numerical validation (pending) | 🚧 |
 
 ### Phase 3 — TurboQuant-Aware Blocks (Planned)
 
@@ -189,6 +294,8 @@ page_table ───────────┘
 
 ## Files
 
+### Phase 1
+
 | File | Purpose |
 |---|---|
 | `src/llama-kv-cache.h` | Page table structs, method declarations |
@@ -197,6 +304,19 @@ page_table ───────────┘
 | `ggml/src/ggml-cuda/paged-gather.cu` | CUDA gather kernel + CPU fallback |
 | `ggml/include/ggml.h` | `GGML_OP_GATHER_PAGED_V` op definition |
 | `ggml/src/ggml.c` | Fallback CPU implementation for gather |
+
+### Phase 2 Additions
+
+| File | Change |
+|---|---|
+| `ggml/include/ggml.h` | `ggml_flash_attn_ext_set_page_table()` declaration |
+| `ggml/src/ggml.c` | `ggml_flash_attn_ext_set_page_table()` implementation (sets `src[5]`) |
+| `ggml/src/ggml-cuda/fattn-common.cuh` | `v_paged_ptr()` helper; extended `fattn_kernel_t`; `launch_fattn()` reads `src[5]` |
+| `ggml/src/ggml-cuda/fattn-vec.cuh` | Paged V access via `v_paged_ptr()` |
+| `ggml/src/ggml-cuda/fattn-tile.cuh` | Paged V access via `v_paged_ptr()` |
+| `ggml/src/ggml-cuda/fattn-mma-f16.cuh` | ABI compat stub |
+| `ggml/src/ggml-cuda/fattn-wmma-f16.cu` | ABI compat stub |
+| `src/llama-graph.cpp` | Phase 2 graph branch (4D view + skip gather + `set_page_table`) |
 
 See also [docs/paged-attention-design.md](paged-attention-design.md) for the original
 architecture review document.

@@ -194,6 +194,19 @@ path, fixing Gemma 2 compatibility.
 - Reduces quantization error on channels with large activation magnitudes.
 - Controlled by `TURBO_INNERQ=N` env var.
 
+### Paged Attention Phase 2 — Native Paged FA
+
+**Feature**: Eliminated gather kernel by integrating page table lookup directly into Flash Attention kernels.
+
+- `v_paged_ptr()` device helper in `fattn-common.cuh` — shared by VEC and TILE kernels.
+- Extended `fattn_kernel_t` with `v_ptable`, `v_ptable_ne0`, `v_block_size` params.
+- `launch_fattn()` reads `dst->src[5]` for page table tensor.
+- All `V + k*nb21` replaced with `v_paged_ptr()` in `fattn-vec.cuh` and `fattn-tile.cuh`.
+- ABI compat stubs for `fattn-mma-f16.cuh` and `fattn-wmma-f16.cu`.
+- `ggml_flash_attn_ext_set_page_table()` API attaches page table to FA op via `src[5]`.
+- Graph builder (`llama-graph.cpp`) skips gather, creates 4D pool view, calls `set_page_table` when FA + paging active.
+- Note: code compiles but awaits numerical validation.
+
 ### `da6b0fd` — GGML_TYPE_TURBO2_0
 
 **Feature**: 2-bit TurboQuant KV cache type (6.4× compression).

@@ -444,6 +444,131 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile(
     ggml_cuda_unroll<5>{}(load);
 }
 
+template<int warp_size, int nwarps, int I, int J, int J_padding, bool oob_check>
+static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
+        const half2 * const __restrict__ V_paged_base,
+        half2 * const __restrict__ tile_KV,
+        const int stride_V2,
+        const int i_sup,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t             sequence,
+        const int32_t             v_ptable_ne0,
+        const int32_t             v_block_size,
+        const int                 k_VKQ_0_plus_k0) {
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+
+    auto load = [&] __device__ (const int n) {
+        const int stride_j = warp_size >> n;
+
+        if (stride_j == 0) {
+            return;
+        }
+
+        const int j0_start = stride_j == warp_size ? 0 : ((J/2)/cpy_ne) - ((J/2)/cpy_ne) % (2*stride_j);
+        const int j0_stop  =                             ((J/2)/cpy_ne) - ((J/2)/cpy_ne) % (1*stride_j);
+        const int stride_i = warp_size / stride_j;
+
+        if (j0_start == j0_stop) {
+            return;
+        }
+
+#pragma unroll
+        for (int i0 = 0; i0 < I; i0 += nwarps*stride_i) {
+            const int i = i0 + threadIdx.y*stride_i + (stride_j == warp_size ? 0 : threadIdx.x / stride_j);
+
+            if (i0 + nwarps*stride_i <= I || i < I) {
+#pragma unroll
+                for (int j0 = j0_start; j0 < j0_stop; j0 += stride_j) {
+                    const int j = j0*cpy_ne + (stride_j == warp_size ? threadIdx.x : threadIdx.x % stride_j)*cpy_ne;
+
+                    const __align__(16) half2 zero[cpy_ne] = {{0.0f, 0.0f}};
+                    const half2 * src_ptr = (const half2 *)v_paged_ptr(
+                        (const char *)V_paged_base,
+                        (int64_t)stride_V2 * sizeof(half2),
+                        v_ptable,
+                        sequence,
+                        v_ptable_ne0,
+                        v_block_size,
+                        k_VKQ_0_plus_k0 + i);
+                    ggml_cuda_memcpy_1<cpy_nb>(
+                        tile_KV + i*(J/2 + J_padding) + j,
+                        !oob_check || i < i_sup ? src_ptr + j : zero);
+                }
+            }
+        }
+    };
+    static_assert(J % 8 == 0, "bad J");
+    static_assert((J/2) % cpy_ne == 0, "bad J");
+    ggml_cuda_unroll<7>{}(load);
+}
+
+template<int warp_size, int nwarps, int I, int J, int J_padding, bool oob_check>
+static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
+        const half2 * const __restrict__ V_paged_base,
+        float * const __restrict__ tile_KV,
+        const int stride_V2,
+        const int i_sup,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t             sequence,
+        const int32_t             v_ptable_ne0,
+        const int32_t             v_block_size,
+        const int                 k_VKQ_0_plus_k0) {
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+
+    auto load = [&] __device__ (const int n) {
+        const int stride_j = warp_size >> n;
+
+        if (stride_j == 0) {
+            return;
+        }
+
+        const int j0_start = stride_j == warp_size ? 0 : (J/cpy_ne) - (J/cpy_ne) % (2*stride_j);
+        const int j0_stop  =                             (J/cpy_ne) - (J/cpy_ne) % (1*stride_j);
+        const int stride_i = warp_size / stride_j;
+
+        if (j0_start == j0_stop) {
+            return;
+        }
+
+#pragma unroll
+        for (int i0 = 0; i0 < I; i0 += nwarps*stride_i) {
+            const int i = i0 + threadIdx.y*stride_i + (stride_j == warp_size ? 0 : threadIdx.x / stride_j);
+
+            if (i0 + nwarps*stride_i <= I || i < I) {
+#pragma unroll
+                for (int j0 = j0_start; j0 < j0_stop; j0 += stride_j) {
+                    const int j = j0*(cpy_ne/2) + (stride_j == warp_size ? threadIdx.x : threadIdx.x % stride_j)*(cpy_ne/2);
+
+                    const half2 zero[cpy_ne/2] = {{0.0f, 0.0f}};
+                    __align__(16) half2 tmp_h2[cpy_ne/2];
+                    const half2 * src_ptr = (const half2 *)v_paged_ptr(
+                        (const char *)V_paged_base,
+                        (int64_t)stride_V2 * sizeof(half2),
+                        v_ptable,
+                        sequence,
+                        v_ptable_ne0,
+                        v_block_size,
+                        k_VKQ_0_plus_k0 + i);
+                    ggml_cuda_memcpy_1<sizeof(tmp_h2)>(
+                        tmp_h2, !oob_check || i < i_sup ? src_ptr + j : zero);
+
+                    __align__(16) float2 tmp_f2[cpy_ne/2];
+#pragma unroll
+                    for (int l = 0; l < cpy_ne/2; ++l) {
+                        tmp_f2[l] = __half22float2(tmp_h2[l]);
+                    }
+                    ggml_cuda_memcpy_1<sizeof(tmp_f2)>(tile_KV + i*(J + J_padding) + 2*j, tmp_f2);
+                }
+            }
+        }
+    };
+    static_assert(J % 8 == 0, "bad J");
+    static_assert(J % cpy_ne == 0, "bad J");
+    ggml_cuda_unroll<5>{}(load);
+}
+
 // Function that performs a single iteration in for the KQ matrix multiplication:
 template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int nbatch_fa, int nbatch_K,
     bool use_logit_softcap, bool oob_check, typename T_vec_dot>
@@ -540,7 +665,11 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
         T_acc * const VKQ,
         const int k_VKQ_0,
         const int k_VKQ_max,
-        const int col_Q_0) {
+        const int col_Q_0,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t             sequence,
+        const int32_t             v_ptable_ne0,
+        const int32_t             v_block_size) {
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
@@ -683,8 +812,8 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
     static_assert(nbatch_V % np == 0, "bad nbatch_V");
 #pragma unroll
     for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
-        flash_attn_tile_load_tile<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
-            (V_h2 + int64_t(k_VKQ_0 + k0)*stride_V2, KV_tmp, stride_V2, k_VKQ_sup - k0);
+        flash_attn_tile_load_tile_paged<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
+            (V_h2, KV_tmp, stride_V2, k_VKQ_sup - k0, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k0);
         __syncthreads();
 
 #ifdef FAST_FP16_AVAILABLE
@@ -776,7 +905,10 @@ static __global__ void flash_attn_tile(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t               v_ptable_ne0,
+        const int32_t               v_block_size) {
 #ifdef FLASH_ATTN_AVAILABLE
 
     // Skip unused kernel variants for faster compilation:
@@ -795,7 +927,8 @@ static __global__ void flash_attn_tile(
                   nb11, nb12, nb13,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
-                  nb31, nb32, nb33);
+                  nb31, nb32, nb33,
+                  v_ptable, v_ptable_ne0, v_block_size);
         NO_DEVICE_CODE;
         return;
     }
@@ -817,7 +950,8 @@ static __global__ void flash_attn_tile(
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
     const float * Q_f  = (const float *) (Q + nb03*sequence + nb02* head0);
     const half2 * K_h2 = (const half2 *) (K + nb13*sequence + nb12*(head0 / gqa_ratio));
-    const half2 * V_h2 = (const half2 *) (V + nb23*sequence + nb22*(head0 / gqa_ratio)); // K and V have same shape
+    // When paged, the pool has no per-sequence stride; only apply head offset.
+    const half2 * V_h2 = (const half2 *) (V + (v_ptable ? (int64_t)0 : nb23*sequence) + nb22*(head0 / gqa_ratio)); // K and V have same shape
 
     const half * maskh = mask ? (const half *) (mask + nb33*(sequence % ne33)) : nullptr;
 
@@ -919,14 +1053,16 @@ static __global__ void flash_attn_tile(
             constexpr bool oob_check = false;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0,
+                v_ptable, sequence, v_ptable_ne0, v_block_size);
             k_VKQ_0 += gridDim.y*nbatch_fa;
         }
         if (k_VKQ_0 < k_VKQ_max) {
             constexpr bool oob_check = true;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0,
+                v_ptable, sequence, v_ptable_ne0, v_block_size);
         }
     } else {
         // Branch without out-of-bounds checks.
@@ -934,7 +1070,8 @@ static __global__ void flash_attn_tile(
             constexpr bool oob_check = false;
             flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
                 (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
-                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0);
+                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0,
+                v_ptable, sequence, v_ptable_ne0, v_block_size);
         }
     }
 

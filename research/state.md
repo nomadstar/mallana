@@ -9,7 +9,8 @@ Este archivo representa el estado vivo del conocimiento en este repositorio. Cua
 ## 📌 Hito Actual (Active Milestone)
 - **Hito**: `milestone-003-paged-attention-native-fa`
 - **Objetivo**: Integrar la búsqueda en tablas de páginas (page table lookups) directamente dentro del kernel de Flash Attention (`fattn-vec.cuh` y `fattn-tile.cuh`), eliminando el paso de gather intermedio de la Fase 1.
-- **Estado**: En progreso (desarrollo y depuración).
+- **Estado**: Implementado — pendiente de validación numérica.
+- **Fase 2 completada**: `v_paged_ptr()` en fattn-common.cuh, todos los accesos V en VEC/TILE migrados, API `ggml_flash_attn_ext_set_page_table()` operativa, grafo salta gather cuando FA + paging activos.
 
 ---
 
@@ -34,6 +35,10 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 ### 4. Paged Attention Fase 1 (Gather-before-FA)
 - **Implementación**: Asignador dinámico de páginas (bloques de 32 tokens) y kernel de gather rápido `GGML_OP_GATHER_PAGED_V` para reconstruir un tensor contiguo de V antes de entrar a Flash Attention.
 - **Resultado**: Correctitud funcional demostrada para contextos dinámicos no contiguos sin tocar los kernels de FA.
+
+### 5. Paged Attention Fase 2 (Native Paged FA)
+- **Implementación**: Integración de búsqueda en tabla de páginas directamente dentro de los kernels VEC y TILE de Flash Attention mediante `v_paged_ptr()`. Elimina el gather intermedio. API `ggml_flash_attn_ext_set_page_table()` para adjuntar tabla de páginas vía `src[5]`. Stubs ABI para kernels MMA-f16 y WMMA-f16.
+- **Resultado**: Código compilado. Pendiente de validación numérica y benchmark de latencia.
 
 ---
 
@@ -68,7 +73,9 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 
 ## 📋 Lista de Tareas Pendientes (TODO)
 
-- [ ] Completar Hito 003 (Native Paged FA)
+- [x] Completar Hito 003 Fase 2 (Native Paged FA — implementación)
+- [ ] Validación numérica Hito 003 (comparación Phase 2 vs Phase 1 vs baseline no-paged)
+- [ ] Benchmark de latencia Hito 003 (contextos >8K tokens)
 - [ ] Ejecutar validación de NaN en `turbo4` (Hito 004)
 - [ ] Portar los kernels de `turbo4` a HIP/ROCm
 - [ ] Implementar el scoring y desalojo físico en TriAttention

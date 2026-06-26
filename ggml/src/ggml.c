@@ -5399,6 +5399,14 @@ void ggml_flash_attn_ext_add_sinks(
     a->src[4] = sinks;
 }
 
+void ggml_flash_attn_ext_set_page_table(
+        struct ggml_tensor * a,
+        struct ggml_tensor * page_table) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] == NULL);
+    a->src[5] = page_table;
+}
+
 // ggml_flash_attn_back
 
 struct ggml_tensor * ggml_flash_attn_back(

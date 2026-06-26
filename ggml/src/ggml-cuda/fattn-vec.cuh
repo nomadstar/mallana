@@ -39,7 +39,10 @@ static __global__ void flash_attn_ext_vec(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t               v_ptable_ne0,
+        const int32_t               v_block_size) {
     ggml_cuda_pdl_lc();
 #ifdef FLASH_ATTN_AVAILABLE
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
@@ -121,7 +124,9 @@ static __global__ void flash_attn_ext_vec(
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
     Q += nb03*sequence + nb02* head              + nb01*ic0;
     K += nb13*sequence + nb12*(head / gqa_ratio);
-    V += nb23*sequence + nb22*(head / gqa_ratio);
+    // When paged, the pool has no per-sequence stride; only apply head offset.
+    V += (v_ptable ? (int64_t)0 : nb23*sequence) + nb22*(head / gqa_ratio);
+    const char * V_paged_base = V; // absolute base for paged access (head already applied)
 
     const half * maskh  = (const half  *) (mask + nb33*(sequence % ne33) + nb31*ic0);
 
@@ -301,11 +306,11 @@ static __global__ void flash_attn_ext_vec(
 
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     K     += blockIdx.y*nthreads * nb11;
-    V     += blockIdx.y*nthreads * nb21;
+    if (!v_ptable) V += blockIdx.y*nthreads * nb21;
     maskh += blockIdx.y*nthreads;
     for (int k_VKQ_0 = blockIdx.y*nthreads; k_VKQ_0 < k_VKQ_max; k_VKQ_0 += gridDim.y*nthreads,
              // Increment pointers after each loop:
-             K += gridDim.y*nthreads*nb11, V += gridDim.y*nthreads*nb21, maskh += gridDim.y*nthreads) {
+             K += gridDim.y*nthreads*nb11, V += (v_ptable ? 0 : gridDim.y*nthreads*nb21), maskh += gridDim.y*nthreads) {
 
         // Calculate KQ tile and keep track of new maximum KQ values:
         float KQ_reg[ncols]; // KQ in registers.
@@ -451,14 +456,14 @@ static __global__ void flash_attn_ext_vec(
                 half2 tmp[V_rows_per_thread/2];
                 if constexpr (type_V == GGML_TYPE_BF16) {
                     float2 tmp_f[V_rows_per_thread/2];
-                    dequantize_V(V + k*nb21, tmp_f,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp_f,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
                         tmp[i_VKQ_1] = __float22half2_rn(tmp_f[i_VKQ_1]);
                     }
                 } else {
-                    dequantize_V(V + k*nb21, tmp,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
                 }
 #pragma unroll
@@ -495,7 +500,7 @@ static __global__ void flash_attn_ext_vec(
             // per-element norm multiply.  centroid[idx]*norm is computed 8/4/16 times
             // (once per centroid) instead of D times (once per element).
             if constexpr (type_V == GGML_TYPE_TURBO3_0) {
-                const block_turbo3_0 * vb = (const block_turbo3_0 *)(V + k*nb21);
+                const block_turbo3_0 * vb = (const block_turbo3_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
                 int prev_ib = -1;
                 float sc[8];
 
@@ -530,7 +535,7 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
             } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
-                const block_turbo2_0 * vb = (const block_turbo2_0 *)(V + k*nb21);
+                const block_turbo2_0 * vb = (const block_turbo2_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
                 int prev_ib = -1;
                 float sc[4];
 
@@ -563,7 +568,7 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
             } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
-                const block_turbo4_0 * vb = (const block_turbo4_0 *)(V + k*nb21);
+                const block_turbo4_0 * vb = (const block_turbo4_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
                 int prev_ib = -1;
                 float sc[16];
 
@@ -600,7 +605,7 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
                 for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                     float2 tmp[V_rows_per_thread/2];
-                    dequantize_V(V + k*nb21, tmp,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {

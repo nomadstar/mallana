@@ -41,10 +41,32 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33);
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t               v_ptable_ne0,
+        const int32_t               v_block_size);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
+
+// Resolve physical V row from logical token index using page table.
+// Shared by fattn-vec.cuh and fattn-tile.cuh.
+static __device__ __forceinline__ const char * v_paged_ptr(
+        const char * __restrict__ V_base,
+        const int64_t             nb21,
+        const int32_t * __restrict__ v_ptable,
+        const int32_t             seq,
+        const int32_t             n0,
+        const int32_t             bs,
+        const int32_t             k_abs) {
+    if (v_ptable) {
+        const int32_t lpage  = k_abs / bs;
+        const int32_t within = k_abs % bs;
+        const int32_t pblock = v_ptable[seq * n0 + lpage];
+        return V_base + ((int64_t)pblock * bs + within) * nb21;
+    }
+    return V_base + (int64_t)k_abs * nb21;
+}
 
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_f16(
@@ -1217,6 +1239,14 @@ void launch_fattn(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
+    const ggml_tensor * v_ptable_tensor = dst->src[5];
+    const int32_t * v_ptable_data  = v_ptable_tensor ? (const int32_t *)v_ptable_tensor->data : nullptr;
+    int32_t         v_ptable_ne0   = v_ptable_tensor ? (int32_t)v_ptable_tensor->ne[0] : 0;
+    int32_t         v_block_size   = 0;
+    if (v_ptable_tensor) {
+        memcpy(&v_block_size, v_ptable_tensor->op_params, sizeof(int32_t));
+    }
+
     ggml_tensor * KQV = dst;
 
     GGML_ASSERT(Q->type == GGML_TYPE_F32);
@@ -1607,7 +1637,8 @@ void launch_fattn(
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
+        v_ptable_data, v_ptable_ne0, v_block_size
     );
     CUDA_CHECK(cudaGetLastError());
 
