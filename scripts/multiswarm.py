@@ -15,6 +15,8 @@ import os
 import sys
 import subprocess
 import shutil
+import threading
+import time
 from datetime import datetime
 
 # ANSI Color codes
@@ -33,9 +35,26 @@ CRITIQUE_FILE = ".multiswarm_critique.md"
 VALIDATION_LOG = ".multiswarm_validation.log"
 HISTORY_LOG = ".multiswarm_history.log"
 
+HEARTBEAT_INTERVAL = 30  # seconds of silence before printing a status line
+
 def check_cli_tool(name):
     """Check if a CLI tool is available in the system PATH."""
     return shutil.which(name) is not None
+
+def format_cmd_display(cmd):
+    """Return a human-readable command string, replacing long --prompt/--print values."""
+    result = []
+    skip_next = False
+    for part in cmd:
+        if skip_next:
+            result.append("<prompt>")
+            skip_next = False
+        elif part in ("--prompt", "--print"):
+            result.append(part)
+            skip_next = True
+        else:
+            result.append(part)
+    return " ".join(result)
 
 def log_session(message):
     """Write log messages to history file."""
@@ -43,15 +62,84 @@ def log_session(message):
     with open(HISTORY_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
 
+def run_with_output(cmd, prefix="", print_func=print, log_file=None):
+    """Run a command streaming stdout/stderr in real time with a heartbeat.
+
+    Prints a status line every HEARTBEAT_INTERVAL seconds when the subprocess
+    produces no output, so the operator can tell it is still alive.
+    Optionally tee's output to log_file (an open file object).
+    Returns the Popen object (with .returncode set).
+    """
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        text=True,
+    )
+    prefix_str = f"{BOLD}[{prefix}]{RESET} " if prefix else ""
+    start = time.monotonic()
+    last_output = [start]
+    stop_event = threading.Event()
+
+    def heartbeat():
+        while not stop_event.is_set():
+            stop_event.wait(timeout=5)
+            if stop_event.is_set():
+                break
+            silence = time.monotonic() - last_output[0]
+            if silence >= HEARTBEAT_INTERVAL:
+                elapsed = time.monotonic() - start
+                print_func(
+                    f"{prefix_str}{YELLOW}⟳ still running… "
+                    f"{elapsed:.0f}s elapsed, last output {silence:.0f}s ago{RESET}",
+                    flush=True,
+                )
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
+
+    for line in iter(process.stdout.readline, ""):
+        if line:
+            last_output[0] = time.monotonic()
+            print_func(f"{prefix_str}{line}", end="", flush=True)
+            if log_file:
+                log_file.write(line)
+                log_file.flush()
+
+    stop_event.set()
+    hb.join()
+    process.wait()
+
+    elapsed = time.monotonic() - start
+    rc_color = GREEN if process.returncode == 0 else RED
+    rc_sym = "✔" if process.returncode == 0 else "✘"
+    print_func(
+        f"{prefix_str}{rc_color}{rc_sym} finished in {elapsed:.1f}s "
+        f"(exit {process.returncode}){RESET}",
+        flush=True,
+    )
+    return process
+
 def run_planning(task, iteration, critique=None, model=None, skip_permissions=False, resume=False):
     """Phase 1: Architect (agy) designs or refines the plan."""
     if iteration == 1:
         prompt = (
             f"You are the ARCHITECT (Gemini / Antigravity CLI). The task is to: '{task}'.\n"
-            f"Analyze the codebase and write a precise, step-by-step implementation plan.\n"
+            f"The codebase is located in the current working directory. You can find key Flash Attention files "
+            f"such as 'fattn-vec.cuh' and 'fattn-tile.cuh' in 'ggml/src/ggml-cuda/'. Do NOT run slow global searches "
+            f"starting from '/' or '$HOME'. Analyze the codebase and write a precise, step-by-step implementation plan.\n"
+            f"Your plan MUST begin with YAML frontmatter (delimited by ---) containing:\n"
+            f"- task: {task}\n"
+            f"- created_at: <current datetime>\n"
+            f"- scope: <e.g. feature, bugfix, tests-only, refactor>\n"
+            f"- forbidden_paths: <list of file/directory paths the plan must not modify>\n"
+            f"\n"
             f"Your output MUST be written in markdown and saved to the file '{PLAN_FILE}'.\n"
-            f"Do not write the implementation code itself, only the files to modify, changes required, "
-            f"and tests needed. Avoid conversational filler."
+            f"CRITICAL: Do NOT run background/asynchronous commands or end your turn to wait for tasks. "
+            f"Run all commands synchronously or read files directly. You MUST write the '{PLAN_FILE}' file in the same turn "
+            f"before completing your execution. Do not write the implementation code itself, only the files to modify, "
+            f"changes required, and tests needed. Avoid conversational filler."
         )
     else:
         prompt = (
@@ -59,7 +147,12 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
             f"Here is the critique/error log:\n"
             f"```\n{critique}\n```\n"
             f"Please read the current plan in '{PLAN_FILE}', refine the plan to resolve these errors, "
-            f"and update the file '{PLAN_FILE}' with the refined plan. Avoid conversational filler."
+            f"and update the file '{PLAN_FILE}' with the refined plan. Avoid conversational filler.\n"
+            f"IMPORTANT: Preserve the YAML frontmatter at the top of the plan. Update 'created_at' "
+            f"to the current datetime if desired.\n"
+            f"CRITICAL: Do NOT run background/asynchronous commands or end your turn to wait for tasks. "
+            f"Run all commands synchronously or read files directly. You MUST write the updated '{PLAN_FILE}' file in the same turn "
+            f"before completing your execution."
         )
 
     cmd = ["agy"]
@@ -73,16 +166,16 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
     cmd.extend(["--prompt", prompt])
 
     print(f"\n{BOLD}{CYAN}=== Phase 1: Planning with Architect (agy) ==={RESET}")
-    print(f"Executing: {' '.join(cmd)}")
+    print(f"Executing: {format_cmd_display(cmd)}")
     log_session(f"Starting planning phase, iteration {iteration}")
 
-    # Run interactively so user can see prompts and output
-    res = subprocess.run(cmd)
+    # Run with real-time streaming output
+    res = run_with_output(cmd, prefix="AGY")
     
-    # Fallback check
     if res.returncode == 0:
         if not os.path.exists(PLAN_FILE) or os.path.getsize(PLAN_FILE) == 0:
             print(f"{YELLOW}Warning: '{PLAN_FILE}' was not created or is empty. Please verify the agent wrote it.{RESET}")
+            return False
         return True
     else:
         print(f"{RED}Architect planning failed with return code {res.returncode}.{RESET}")
@@ -130,11 +223,16 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
     cmd.extend(["--print", prompt])
 
     print(f"\n{BOLD}{CYAN}=== Phase 2: Implementation with Implementer (claude) ==={RESET}")
-    print(f"Executing: {' '.join(cmd)}")
+    print(f"Executing: {format_cmd_display(cmd)}")
     log_session(f"Starting implementation phase, iteration {iteration}")
 
-    res = subprocess.run(cmd)
-    return res.returncode == 0
+    res = run_with_output(cmd, prefix="CLAUDE")
+    if res.returncode != 0:
+        return False
+    if not os.path.exists(SUMMARY_FILE) or os.path.getsize(SUMMARY_FILE) == 0:
+        print(f"{YELLOW}Warning: '{SUMMARY_FILE}' was not created or is empty.{RESET}")
+        return False
+    return True
 
 def run_validation():
     """System runs local compilation & unit tests validation."""
@@ -144,9 +242,7 @@ def run_validation():
     validate_script = "scripts/validate.sh"
     if not os.path.exists(validate_script):
         print(f"{YELLOW}Warning: '{validate_script}' not found. Falling back to build tools...{RESET}")
-        if os.path.exists("build/Makefile"):
-            cmd = ["make", "-C", "build"]
-        elif os.path.exists("CMakeLists.txt"):
+        if os.path.exists("CMakeLists.txt") or os.path.exists("build"):
             cmd = ["cmake", "--build", "build"]
         else:
             return False, "No validation script or build system found."
@@ -154,15 +250,14 @@ def run_validation():
         cmd = ["bash", validate_script]
 
     print(f"Executing validation: {' '.join(cmd)}")
-    
+
     with open(VALIDATION_LOG, "w") as log_file:
-        res = subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+        res = run_with_output(cmd, prefix="BUILD", log_file=log_file)
 
     log_content = ""
     if os.path.exists(VALIDATION_LOG):
         with open(VALIDATION_LOG, "r") as f:
             log_content = f.read()
-            print(log_content)
 
     passed = (res.returncode == 0)
     if passed:
@@ -210,11 +305,16 @@ def run_critique(task, iteration, validation_passed, validation_log, model=None,
         cmd.append("--continue")
 
     print(f"\n{BOLD}{CYAN}=== Phase 4: Critique with Reviewer (opencode) ==={RESET}")
-    print(f"Executing: {' '.join(cmd)}")
+    print(f"Executing: {format_cmd_display(cmd)}")
     log_session(f"Starting critique phase, iteration {iteration}")
 
-    res = subprocess.run(cmd)
-    return res.returncode == 0
+    res = run_with_output(cmd, prefix="OPENCODE")
+    if res.returncode != 0:
+        return False
+    if not os.path.exists(CRITIQUE_FILE) or os.path.getsize(CRITIQUE_FILE) == 0:
+        print(f"{YELLOW}Warning: '{CRITIQUE_FILE}' was not created or is empty.{RESET}")
+        return False
+    return True
 
 def check_success():
     """Verify if the critique step declared success."""
@@ -222,10 +322,23 @@ def check_success():
         return False
     with open(CRITIQUE_FILE, "r") as f:
         content = f.read().strip().upper()
-        # Look for the exact word 'SUCCESS' in the response
-        if "SUCCESS" in content and len(content) < 30:
-            return True
-    return False
+    return "SUCCESS" in content
+
+def parse_plan_task():
+    """Parse the 'task' field from an existing plan file's YAML frontmatter."""
+    if not os.path.exists(PLAN_FILE) or os.path.getsize(PLAN_FILE) == 0:
+        return None
+    with open(PLAN_FILE, "r") as f:
+        content = f.read()
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            frontmatter = content[3:end].strip()
+            for line in frontmatter.split("\n"):
+                line = line.strip()
+                if line.startswith("task:"):
+                    return line[len("task:"):].strip()
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Agent Swarm Orchestrator (Multiswarm)")
@@ -234,6 +347,8 @@ def main():
     parser.add_argument("--skip-permissions", action="store_true", help="Auto-approve tool permissions (skip prompts)")
     parser.add_argument("--no-interactive", action="store_true", help="Run without asking for confirmation between phases")
     parser.add_argument("--continue-session", action="store_true", help="Continue previous CLI sessions if possible")
+    parser.add_argument("--use-plan", action="store_true", help="Use existing .multiswarm_plan.md without running Architect planning")
+    parser.add_argument("--force-use-plan", action="store_true", help="Use existing plan even if its task field does not match --task")
     parser.add_argument("--model-agy", help="Model override for agy")
     parser.add_argument("--model-claude", help="Model override for claude")
     parser.add_argument("--model-opencode", help="Model override for opencode")
@@ -262,9 +377,50 @@ def main():
     print(f"{BOLD}{GREEN}================================================================{RESET}\n")
 
     # Clear old temporary files from previous runs
-    for f in [PLAN_FILE, SUMMARY_FILE, CRITIQUE_FILE, VALIDATION_LOG]:
+    for f in [SUMMARY_FILE, CRITIQUE_FILE, VALIDATION_LOG]:
         if os.path.exists(f):
             os.remove(f)
+
+    use_existing_plan = False
+    if args.use_plan or args.force_use_plan:
+        if not os.path.exists(PLAN_FILE) or os.path.getsize(PLAN_FILE) == 0:
+            print(f"{RED}Error: --use-plan specified but '{PLAN_FILE}' does not exist or is empty!{RESET}")
+            sys.exit(1)
+        stored_task = parse_plan_task()
+        print(f"\n{BOLD}Current task:{RESET}       {args.task}")
+        print(f"{BOLD}Stored plan task:{RESET}  {stored_task or '(no frontmatter)'}")
+        if stored_task and stored_task != args.task:
+            if args.force_use_plan:
+                print(f"{YELLOW}  Reuse allowed: yes (--force-use-plan overrides mismatch){RESET}")
+                use_existing_plan = True
+            else:
+                print(f"{RED}  Reuse allowed: no (task mismatch){RESET}")
+                print(f"{RED}Error: --use-plan requires the stored plan task to match --task.{RESET}")
+                print(f"       Use --force-use-plan to override.{RESET}")
+                sys.exit(1)
+        else:
+            print(f"{GREEN}  Reuse allowed: yes{RESET}")
+            use_existing_plan = True
+    else:
+        if os.path.exists(PLAN_FILE) and os.path.getsize(PLAN_FILE) > 0:
+            stored_task = parse_plan_task()
+            print(f"\n{BOLD}Existing plan found in '{PLAN_FILE}':{RESET}")
+            print(f"  {BOLD}Current task:{RESET}       {args.task}")
+            print(f"  {BOLD}Stored plan task:{RESET}  {stored_task or '(no frontmatter)'}")
+            if stored_task and stored_task != args.task:
+                print(f"  {RED}Reuse allowed: no (task mismatch){RESET}")
+                print(f"  {YELLOW}Auto-removing incompatible plan.{RESET}")
+                os.remove(PLAN_FILE)
+            else:
+                print(f"  {GREEN}Reuse allowed: yes{RESET}")
+                if not args.no_interactive:
+                    choice = input(f"\n{BOLD}{YELLOW}Reuse existing plan? (y/n): {RESET}").strip().lower()
+                    if choice == 'y':
+                        use_existing_plan = True
+                    else:
+                        os.remove(PLAN_FILE)
+                else:
+                    use_existing_plan = True
 
     log_session(f"New multiswarm task initiated: {args.task}")
 
@@ -279,12 +435,20 @@ def main():
                 critique = f.read()
 
         # Step 1: Planning
-        if not run_planning(args.task, iteration, critique, args.model_agy, args.skip_permissions, args.continue_session):
-            print(f"{RED}Planning failed in iteration {iteration}. Aborting.{RESET}")
-            break
+        if use_existing_plan and iteration == 1:
+            print(f"\n{BOLD}{CYAN}=== Phase 1: Planning (Reusing Existing Plan) ==={RESET}")
+            print(f"Reusing existing plan from '{PLAN_FILE}'")
+        else:
+            if not run_planning(args.task, iteration, critique, args.model_agy, args.skip_permissions, args.continue_session):
+                print(f"{RED}Planning failed in iteration {iteration}. Aborting.{RESET}")
+                break
 
         if not args.no_interactive:
-            choice = input(f"\n{BOLD}{YELLOW}Plan updated in '{PLAN_FILE}'. Proceed to Implementation? (y/n): {RESET}").strip().lower()
+            if use_existing_plan and iteration == 1:
+                # Ask to proceed using the existing plan
+                choice = input(f"\n{BOLD}{YELLOW}Proceed to Implementation with existing plan? (y/n): {RESET}").strip().lower()
+            else:
+                choice = input(f"\n{BOLD}{YELLOW}Plan updated in '{PLAN_FILE}'. Proceed to Implementation? (y/n): {RESET}").strip().lower()
             if choice != 'y':
                 print("Swarm aborted by user.")
                 break
