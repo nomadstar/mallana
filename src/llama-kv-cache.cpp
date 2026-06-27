@@ -386,11 +386,13 @@ llama_kv_cache::llama_kv_cache(
             pg_free_blocks.clear();
         }
 
-        // Zero out physical block 0 for layer.v in all layers
-        for (auto & layer : layers) {
-            if (layer.v != nullptr) {
-                std::vector<uint8_t> zeros(pg_block_size * layer.v->nb[1], 0);
-                ggml_backend_tensor_set(layer.v, zeros.data(), 0, zeros.size());
+        // Zero out physical block 0 for layer.v in all layers (skip during no_alloc probing)
+        if (!model.hparams.no_alloc) {
+            for (auto & layer : layers) {
+                if (layer.v != nullptr && layer.v->buffer != nullptr) {
+                    std::vector<uint8_t> zeros(pg_block_size * layer.v->nb[1], 0);
+                    ggml_backend_tensor_set(layer.v, zeros.data(), 0, zeros.size());
+                }
             }
         }
     }
@@ -1220,7 +1222,8 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
     if (!pg_enabled) return;
     const uint32_t n_pages_per_stream = (uint32_t) pg_page_table[0].size();
-    // [DIAG-ALLOC] show allocations
+    // [DIAG-ALLOC] show allocations (gated behind TURBO_DIAG_KQ)
+#if defined(TURBO_DIAG_KQ)
     {
         static int s_alloc_call = 0;
         fprintf(stderr, "[PGALLOC#%d] n_stream=%zu s0=%u s1=%u",
@@ -1238,6 +1241,7 @@ void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
         }
         fprintf(stderr, " free_blocks=%zu\n", pg_free_blocks.size());
     }
+#endif
     for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
         const uint32_t strm = sinfo.strm[s];
         std::set<uint32_t> current_batch_pages;
@@ -1284,7 +1288,8 @@ void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
             }
         }
     }
-    // [DIAG-ALLOC] show resulting page table
+    // [DIAG-ALLOC] show resulting page table (gated behind TURBO_DIAG_KQ)
+#if defined(TURBO_DIAG_KQ)
     {
         fprintf(stderr, "[PGALLOC-RESULT] pg_page_table: ");
         for (uint32_t s = 0; s < (uint32_t)pg_page_table.size() && s < 3; ++s) {
@@ -1296,6 +1301,7 @@ void llama_kv_cache::pg_alloc_for_sinfo(const slot_info & sinfo) {
         }
         fprintf(stderr, "\n");
     }
+#endif
 }
 
 bool llama_kv_cache::get_can_shift() const {
@@ -1451,7 +1457,7 @@ void llama_kv_cache::set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, co
             tmp[s * n_lpage + lp] = (pblock >= 0) ? pblock : 0;
         }
     }
-    // [DIAG] Print what we're writing to the page table.
+#if defined(TURBO_DIAG_KQ)
     {
         static int s_call = 0;
         static bool s_first = true;
@@ -1466,6 +1472,7 @@ void llama_kv_cache::set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, co
         }
         s_first = !s_first;
     }
+#endif
     ggml_backend_tensor_set(dst, tmp.data(), 0, nelems * sizeof(int32_t));
     (void) n_kv;
 }
@@ -1659,7 +1666,7 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
                     data[s*sinfo.size() + i] = (int64_t)pblock * pg_block_size + within;
                 }
             }
-            // [DIAG-VIDXS] print first and last few entries per stream
+#if defined(TURBO_DIAG_KQ)
             {
                 static int s_vidxs_call = 0;
                 fprintf(stderr, "[VIDXS#%d] ns=%zu size=%zu: ", s_vidxs_call++,
@@ -1673,6 +1680,7 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
                 }
                 fprintf(stderr, "\n");
             }
+#endif
         } else {
             for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
                 const int64_t offs = sinfo.strm[s]*get_size();

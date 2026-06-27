@@ -570,9 +570,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    fprintf(stderr, "[TURBO_FATTN_ENTRY] K=%s V=%s ne1=%d\n",
-            ggml_type_name(dst->src[1]->type), ggml_type_name(dst->src[2]->type), (int)dst->src[0]->ne[1]);
-    { FILE * _f = fopen("/tmp/turbo_fattn_entry.txt", "a"); if (_f) { fprintf(_f, "CALLED K=%s ne1=%d\n", ggml_type_name(dst->src[1]->type), (int)dst->src[0]->ne[1]); fclose(_f); } }
     best_fattn_kernel kernel = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
 #if defined(TURBO_DIAG_KQ)
     printf("TURBO_DIAG_FLASH_ATTN_EXT called K_type=%s V_type=%s kernel=%d Q_ne1=%d\n", ggml_type_name(dst->src[1]->type), ggml_type_name(dst->src[2]->type), (int)kernel, dst->src[0]->ne[1]);
