@@ -7,9 +7,9 @@ Este archivo representa el estado vivo del conocimiento en este repositorio. Cua
 ---
 
 ## 📌 Hito Actual (Active Milestone)
-- **Hito**: `milestone-004-nan-inf-validation`
-- **Objetivo**: Explicit turbo4 NaN/Inf validation: add guards in CPU quantizer/dequantizer (ggml-turbo-quant.c) and CUDA dequantizer (turbo-quant.cuh) to prevent NaN/Inf propagation; extend test-turbo-quant.c with extreme-input test cases.
-- **Estado**: Implementado y listo para validación.
+- **Hito**: `milestone-006-triattention-kv-eviction`
+- **Objetivo**: Implementar desalojo físico de páginas KV mediante scoring TriAttention con claves K invertidas por RoPE, más presupuesto configurable vía `--triattention-page-budget`.
+- **Estado**: Implementado. Build OK. Pendiente validación numérica/calibración.
 
 ---
 
@@ -38,6 +38,14 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 ### 5. Paged Attention Fase 2 (Native Paged FA)
 - **Implementación**: Integración de búsqueda en tabla de páginas directamente dentro de los kernels VEC y TILE de Flash Attention mediante `v_paged_ptr()`. Elimina el gather intermedio. API `ggml_flash_attn_ext_set_page_table()` para adjuntar tabla de páginas vía `src[5]`. Stubs ABI para kernels MMA-f16 y WMMA-f16.
 - **Resultado**: Código compilado. Pendiente de validación numérica y benchmark de latencia.
+
+### 6. ROCm/HIP Backend Completion
+- **Implementación**: Compatibilidad HIP completada para shuffles de warp y ballot en los caminos de SET_ROWS y Flash Attention. `__shfl_xor_sync` ajustado al formulario de 4 argumentos con `WARP_SIZE`; `__ballot_sync` actualizado para wavefront AMD de 64 hilos.
+- **Resultado**: Build HIP/ROCm corregido. Auditoría de `turbo-quant.cuh`, `fattn-common.cuh` y `fattn-tile.cuh` sin cambios adicionales.
+
+### 7. TriAttention KV Eviction
+- **Implementación**: Presupuesto configurable de páginas físicas (`--triattention-page-budget`), bloque físico 0 reservado como dummy zero block y `pg_score_and_evict()` para desalojar la página de menor score usando productos punto sobre K con RoPE inverso.
+- **Resultado**: Implementado y compila. Pendiente de validación numérica de calidad/perplexity.
 
 ---
 
@@ -73,8 +81,9 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 ## 📋 Lista de Tareas Pendientes (TODO)
 
 - [x] Completar Hito 003 Fase 2 (Native Paged FA — implementación)
-- [ ] Validación numérica Hito 003 (comparación Phase 2 vs Phase 1 vs baseline no-paged)
+- [ ] Validación GPU numérica Hito 003 (comparación Phase 2 vs Phase 1 vs baseline no-paged)
 - [ ] Benchmark de latencia Hito 003 (contextos >8K tokens)
-- [ ] Ejecutar validación de NaN en `turbo4` (Hito 004)
-- [ ] Portar los kernels de `turbo4` a HIP/ROCm
-- [ ] Implementar el scoring y desalojo físico en TriAttention
+- [x] Ejecutar validación de NaN en `turbo4` (Hito 004)
+- [x] Portar los kernels de `turbo4` a HIP/ROCm
+- [x] Implementar el scoring y desalojo físico en TriAttention
+- [ ] Validación numérica Hito 006 (TriAttention KV eviction)

@@ -14,11 +14,12 @@ gantt
     Milestone 001 - Auditoría CPU/CUDA           :done,    m1, 2026-04-01, 2026-06-10
     section Fase 2
     Milestone 002 - Paged Attention Fase 1       :done,    m2, 2026-06-11, 2026-06-20
-    Milestone 003 - Paged Attention Native FA   :active,  m3, 2026-06-21, 2026-07-15
+    Milestone 003 - Paged Attention Native FA   :done,    m3, 2026-06-21, 2026-07-15
     section Fase 3
-    Milestone 004 - Validación NaN turbo4        :ref,     m4, after m3, 10d
-    Milestone 005 - ROCm Backend Completo        :         m5, after m4, 15d
-    Milestone 006 - TriAttention Eviction        :         m6, after m5, 20d
+    Milestone 004 - Validación NaN turbo4        :done,    m4, after m3, 10d
+    Milestone 005 - ROCm Backend Completo        :done,    m5, after m4, 15d
+    Milestone 006 - TriAttention Eviction        :active,  m6, after m5, 20d
+    Milestone 007 - Calibración y validación TriAttention :         m7, after m6, 15d
 ```
 
 ---
@@ -43,7 +44,7 @@ gantt
 - **Evidencia**: Ejecución correcta con paginación activa y caída elegante si FA se deshabilita.
 
 ### [Milestone 003: Paged Attention Phase 2 — Native Paged FA](file:///home/ignatus/GitHub/llama-cpp-turboquant/research/milestone-003/)
-- **Estado**: 🚧 **EN PROGRESO** (Activo)
+- **Estado**: ✅ **IMPLEMENTADO** — pendiente validación numérica GPU
 - **Prioridad**: P2 (Rendimiento)
 - **Objetivos**:
   - Eliminar el kernel de gather intermedio y la asignación temporal en memoria global.
@@ -51,22 +52,30 @@ gantt
   - Reemplazar direccionamiento contiguo en `fattn-vec.cuh` y `fattn-tile.cuh` con indexación dinámica de páginas.
 
 ### [Milestone 004: Explicit turbo4 NaN Validation](file:///home/ignatus/GitHub/llama-cpp-turboquant/research/milestone-004/)
-- **Estado**: 📅 **PLANIFICADO**
+- **Estado**: ✅ **COMPLETADO**
 - **Prioridad**: P1 (Robustez)
 - **Objetivos**:
   - Diseñar suite de test con distribuciones extremas (Gaussianas, Laplace, Uniformes con outliers masivos).
   - Asegurar que ningún de-cuantizador de `turbo4` retorne NaN o Inf bajo ninguna circunstancia.
 
 ### [Milestone 005: ROCm Backend Completion](file:///home/ignatus/GitHub/llama-cpp-turboquant/research/milestone-005/)
-- **Estado**: 📅 **PLANIFICADO**
+- **Estado**: ✅ **COMPLETADO**
 - **Prioridad**: P3 (Portabilidad)
 - **Objetivos**:
   - Resolver diferencias mínimas de API entre CUDA y HIP.
   - Compilar y validar soporte completo de `turbo4` en GPUs AMD (RDNA3/CDNA).
 
 ### [Milestone 006: TriAttention KV Eviction](file:///home/ignatus/GitHub/llama-cpp-turboquant/research/milestone-006/)
-- **Estado**: 📅 **PLANIFICADO**
+- **Estado**: 🚧 **IMPLEMENTADO** — pendiente validación
 - **Prioridad**: P4 (Investigación)
 - **Objetivos**:
   - Integrar scoring de claves (K) proyectadas con RoPE inverso.
   - Implementar desalojo físico de páginas con menor relevancia en el pool.
+
+### [Milestone 007: TriAttention Calibration and Numerical Validation](file:///home/ignatus/GitHub/llama-cpp-turboquant/research/milestone-007/)
+- **Estado**: 📅 **PLANIFICADO**
+- **Prioridad**: P4 (Investigación)
+- **Objetivos**:
+  - Calibrar el scoring de páginas TriAttention sobre corpus representativos.
+  - Validar numéricamente la hipótesis H6.1 frente al baseline sin eviction.
+  - Medir calidad/perplexidad con presupuestos de páginas decrecientes.

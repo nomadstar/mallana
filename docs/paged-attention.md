@@ -84,6 +84,24 @@ but mark them `GGML_UNUSED` — only the VEC and TILE kernels implement paged ac
 **Performance target (not yet validated):** 10–15% latency reduction for sequences >8K tokens
 by eliminating gather's global-memory write + read.
 
+### Phase 3 — TriAttention KV Eviction (Implemented, Pending Validation)
+
+Phase 3 adds an eviction policy on top of the paged V pool so long contexts can continue once a
+fixed physical page budget is reached. The current implementation introduces:
+
+- `--triattention-page-budget N` CLI flag, where `0` disables eviction and preserves the Phase 2
+  behavior.
+- Reserved physical block `0` as a dummy zero block, ensuring evicted pages can safely map to a
+  known zero-filled backing page.
+- `pg_score_and_evict()` in the KV cache, which scores resident pages using RoPE-inverted K
+  dot-products and evicts the lowest-scoring page when the configured page budget is exhausted.
+
+**Hypothesis H6.1:** TriAttention eviction can preserve roughly 95% of baseline quality while
+using only 50% of the physical pages.
+
+**Status:** Implemented and builds successfully, but numerical quality validation is still
+pending.
+
 ---
 
 ## Architecture
@@ -218,6 +236,7 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 |---|---|---|
 | Page block size | 32 tokens | Aligned to `QK_TURBO3` |
 | Auto-enable | When `v_trans == false` (FA path) | Also requires `LLAMA_NO_PAGING` not set |
+| TriAttention page budget | `--triattention-page-budget N` | `0` disables eviction; `N > 0` enables physical-page eviction |
 | Disable | `LLAMA_NO_PAGING=1` | Reverts to legacy contiguous layout |
 
 ---
@@ -278,7 +297,17 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 | 8 | Wire graph to skip gather and create 4D pool view when FA + paging active | ✅ |
 | 9 | Numerical validation (pending) | 🚧 |
 
-### Phase 3 — TurboQuant-Aware Blocks (Planned)
+### Phase 3 — TriAttention KV Eviction (Implemented)
+
+| Step | Description | Status |
+|---|---|---|
+| 1 | Add configurable physical page budget (`--triattention-page-budget`) | ✅ |
+| 2 | Reserve dummy physical block 0 for safe zero-backed eviction targets | ✅ |
+| 3 | Implement `pg_score_and_evict()` using RoPE-inverted K scoring | ✅ |
+| 4 | Trigger eviction when physical budget is reached | ✅ |
+| 5 | Numerical/perplexity validation for H6.1 | 🚧 |
+
+### Future: TurboQuant-Aware Blocks
 
 - Align block size to TurboQuant dequant tiles for zero-copy reads.
 - Block size = 128 tokens (matching turbo block size).
@@ -317,6 +346,20 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 | `ggml/src/ggml-cuda/fattn-mma-f16.cuh` | ABI compat stub |
 | `ggml/src/ggml-cuda/fattn-wmma-f16.cu` | ABI compat stub |
 | `src/llama-graph.cpp` | Phase 2 graph branch (4D view + skip gather + `set_page_table`) |
+
+### Phase 3 Additions
+
+| File | Change |
+|---|---|
+| `include/llama.h` | Public config exposure for TriAttention page budget |
+| `src/llama-cparams.h` | Runtime parameter storage for page budget |
+| `src/llama-context.cpp` | Context wiring for TriAttention configuration |
+| `common/common.h` | CLI/common option declaration |
+| `common/common.cpp` | Option defaults and propagation |
+| `common/arg.cpp` | `--triattention-page-budget` parsing |
+| `src/llama-kv-cache.h` | Eviction method declarations and paged-cache state |
+| `src/llama-kv-cache.cpp` | Dummy block reservation, scoring, and eviction implementation |
+| `src/llama-model.cpp` | Model/runtime integration for TriAttention config |
 
 See also [docs/paged-attention-design.md](paged-attention-design.md) for the original
 architecture review document.

@@ -6,6 +6,59 @@
 
 ## 2026-06
 
+### TriAttention KV eviction implementation
+
+**Feature**: Added page-budgeted KV eviction for paged V cache using RoPE-inverted key
+scoring.
+
+- New CLI flag `--triattention-page-budget N` (`0` = disabled).
+- Physical block 0 reserved as a dummy zero block.
+- `pg_score_and_evict()` scores resident pages using RoPE-inverted K dot-products and evicts
+  the lowest-scoring page when the physical page budget is exhausted.
+- Wiring added across `include/llama.h`, `src/llama-cparams.h`, `src/llama-context.cpp`,
+  `common/common.h`, `common/common.cpp`, `common/arg.cpp`, `src/llama-kv-cache.h`,
+  `src/llama-kv-cache.cpp`, and `src/llama-model.cpp`.
+
+**Status**: Implemented, build passes, pending numerical validation.
+
+### ROCm backend completion
+
+**Fix**: Completed HIP portability work for the paged attention and TurboQuant CUDA codepaths.
+
+- Fixed warp shuffle arity in `set-rows.cu` and `fattn-vec.cuh` by passing `WARP_SIZE` to the
+  4-argument HIP-compatible shuffle form.
+- Updated `__ballot_sync` macro in `vendors/hip.h` for AMD 64-thread wavefront behavior.
+- Audited `turbo-quant.cuh`, `fattn-common.cuh`, and `fattn-tile.cuh`; no additional changes
+  were required.
+
+**Status**: Complete.
+
+### Explicit NaN/Inf validation for turbo quantizers
+
+**Robustness**: Added non-finite guards across CPU and CUDA TurboQuant paths.
+
+- CPU `ggml-turbo-quant.c`: `isfinite()` guards added in quantize/dequantize paths for
+  `turbo2`, `turbo3`, and `turbo4`.
+- CUDA `turbo-quant.cuh`: matching `isfinite()` guards added to the dequantizer helpers.
+- `tests/test-turbo-quant.c`: 6 extreme-input round-trip tests added and registered in
+  `tests/CMakeLists.txt`.
+- Hypothesis H4.1 now supported by automated tests.
+
+**Status**: Complete. All tests pass.
+
+### Paged Attention Phase 2 — native paged FA integrated
+
+**Feature**: Completed the native paged Flash Attention path and exposed page-table attachment
+through a dedicated GGML API.
+
+- `ggml_flash_attn_ext_set_page_table()` attaches the page table through `src[5]`.
+- `v_paged_ptr()` helper added in `fattn-common.cuh` and shared by the VEC/TILE FA kernels.
+- `fattn_kernel_t` extended with page-table metadata.
+- `llama-graph.cpp` now has the Phase 2 branch that skips gather, builds a 4D pool view, and
+  calls `set_page_table()` when FA + paging are active.
+
+**Status**: Implemented, build passes, pending GPU numerical validation.
+
 ### Mathematical consistency audit — CPU/CUDA equivalence verified
 
 **Scope**: Complete audit of all TurboQuant mathematical contracts between CPU and CUDA

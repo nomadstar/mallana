@@ -51,9 +51,9 @@ unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
 | Quality Gate (automated PPL + speed) | ✅ Operational |
 | Paged Attention (Phase 1) | ✅ Functional |
-| Paged Attention (Phase 2) | 🚧 Code Complete — Pending Validation |
-| TriAttention | 🚧 In Progress |
-| ROCm / HIP Portability Audit | ✅ Complete — Prepared |
+| Paged Attention (Phase 2) | 🚧 Implemented — Pending GPU Validation |
+| TriAttention | 🚧 Implemented — Pending Validation |
+| ROCm / HIP Portability Audit | ✅ Complete — HIP compatibility fixes validated |
 | Metal Support | ✅ Stable |
 | Vulkan Support | ❌ Not Started |
 
@@ -239,9 +239,8 @@ KV Cache (per layer)
 
 | Milestone | Priority |
 |---|---|
-| Paged Attention Phase 2 (native paged FA) | P2 |
-| Explicit turbo4 NaN validation | P1 |
-| ROCm backend completion | P3 |
+| Paged Attention Phase 2 (native paged FA, code-complete pending validation) | P2 |
+| TriAttention calibration and numerical validation | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |
 | Vulkan TurboQuant kernels | P3 |
@@ -278,7 +277,7 @@ on a validated foundation.
 
 - [x] Phase 1: Gather-before-FA with dynamic page allocation (✅ Functional)
 - [x] Phase 2: Native paged FA (page-table-lookup in kernel) (🚧 Pending Validation)
-- [ ] Phase 3: TurboQuant-aware block alignment
+- [x] Phase 3: TriAttention KV eviction via RoPE-inverted key scoring (🚧 Pending Validation)
 - [ ] Sliding window support
 - [ ] Continuous batching
 
