@@ -260,11 +260,10 @@ llama_kv_cache::llama_kv_cache(
         }
 
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
-        // For paged attention (v_trans=false) the V tensor needs one extra block of rows
-        // beyond kv_size so the dummy zero block (block 0) doesn't consume a slot from the
-        // usable pool.  Without this extra block the pool has pg_n_blocks-1 physical blocks
-        // for pg_n_blocks logical pages, causing pg_alloc_for_sinfo to abort when all pages
-        // are needed simultaneously (e.g. llama-perplexity with n_seq=4).
+        // For paged attention (v_trans=false) the V tensor has one extra block of rows per
+        // stream beyond kv_size.  This ensures that block 0 (the dummy zero block, pre-zeroed
+        // and never allocated) does not consume a slot from the usable page pool.
+        // Total usable blocks = (n_pages_per_stream + 1) * n_stream - 1  (see pg_n_blocks below).
         const uint32_t v_rows = (!v_trans) ? kv_size + pg_block_size : kv_size;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, v_rows, n_stream) : nullptr;
 
