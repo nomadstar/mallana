@@ -108,11 +108,12 @@ llama_kv_cache::llama_kv_cache(
         v_cells[s].resize(kv_size);
     }
 
-    // by default, all sequence ids are mapped to the 0th stream
+    // All seq IDs default to stream 0.  Keep vector at LLAMA_MAX_SEQ so that seq IDs
+    // ≥ n_stream (which are invalid for non-unified KV) still index in-bounds and
+    // hit the assertion at each call site rather than causing UB.
     seq_to_stream.resize(LLAMA_MAX_SEQ, 0);
 
     if (n_stream > 1) {
-        seq_to_stream.resize(n_stream, 0);
         for (uint32_t s = 0; s < n_stream; ++s) {
             seq_to_stream[s] = s;
         }
@@ -380,11 +381,17 @@ llama_kv_cache::llama_kv_cache(
     pg_enabled = !v_trans && (getenv("LLAMA_NO_PAGING") == nullptr);
     if (pg_enabled) {
         const uint32_t n_pages_per_stream = (kv_size + pg_block_size - 1) / pg_block_size;
-        pg_n_blocks = n_pages_per_stream * n_stream;
+        // V tensor has (kv_size + pg_block_size) rows per stream = (n_pages_per_stream + 1)
+        // blocks per stream.  Total physical blocks across all streams:
+        //   (n_pages_per_stream + 1) * n_stream
+        // Block 0 is the dummy zero block (shared, pre-zeroed, never in the free pool).
+        // Usable blocks: (n_pages_per_stream + 1) * n_stream - 1.
+        //
+        // Prior bug (n_stream > 1): pg_n_blocks was n_pages_per_stream * n_stream, leaving
+        // n_stream - 1 physical blocks at the end of the V tensor permanently unreachable.
+        pg_n_blocks = (n_pages_per_stream + 1) * n_stream - 1;
         pg_page_table.assign(n_stream, std::vector<int32_t>(n_pages_per_stream, -1));
-        // Physical block 0 is the dummy zero block (pre-zeroed, never put in the free pool).
-        // The V tensor has kv_size+pg_block_size rows so blocks 1..pg_n_blocks are all
-        // usable — exactly pg_n_blocks physical blocks for pg_n_blocks logical pages.
+        // Pool is a LIFO stack of free physical block indices (1..pg_n_blocks).
         if (pg_n_blocks > 0) {
             pg_free_blocks.resize(pg_n_blocks);
             for (uint32_t i = 0; i < pg_n_blocks; ++i) {
@@ -415,7 +422,7 @@ void llama_kv_cache::clear(bool data) {
         }
     }
     if (pg_enabled) {
-        // Physical block 0 is the dummy zero block.  Pool has blocks 1..pg_n_blocks (LIFO).
+        // Pool has all usable physical blocks 1..pg_n_blocks (LIFO).
         if (pg_n_blocks > 0) {
             pg_free_blocks.resize(pg_n_blocks);
             for (uint32_t i = 0; i < pg_n_blocks; ++i) {
@@ -1432,7 +1439,7 @@ ggml_tensor * llama_kv_cache::get_v_paged(ggml_context * ctx, int32_t il, uint32
     GGML_ASSERT(pg_enabled);
     const int32_t ikv = map_layer_ids.at(il);
     auto * v = layers[ikv].v;
-    const int64_t pool_rows = (int64_t)v->ne[1] * v->ne[2];  // kv_size * n_stream
+    const int64_t pool_rows = (int64_t)v->ne[1] * v->ne[2];  // (kv_size + pg_block_size) * n_stream
     // Return as flat 2D [n_embd_v_gqa, pool_rows] view (single stream dimension = flat pool)
     return ggml_reshape_2d(ctx, v, v->ne[0], pool_rows);
 }
