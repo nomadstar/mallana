@@ -259,7 +259,13 @@ llama_kv_cache::llama_kv_cache(
         }
 
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
+        // For paged attention (v_trans=false) the V tensor needs one extra block of rows
+        // beyond kv_size so the dummy zero block (block 0) doesn't consume a slot from the
+        // usable pool.  Without this extra block the pool has pg_n_blocks-1 physical blocks
+        // for pg_n_blocks logical pages, causing pg_alloc_for_sinfo to abort when all pages
+        // are needed simultaneously (e.g. llama-perplexity with n_seq=4).
+        const uint32_t v_rows = (!v_trans) ? kv_size + pg_block_size : kv_size;
+        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, v_rows, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
         has_v && ggml_format_name(v, "cache_v_l%d", il);
@@ -376,11 +382,13 @@ llama_kv_cache::llama_kv_cache(
         const uint32_t n_pages_per_stream = (kv_size + pg_block_size - 1) / pg_block_size;
         pg_n_blocks = n_pages_per_stream * n_stream;
         pg_page_table.assign(n_stream, std::vector<int32_t>(n_pages_per_stream, -1));
-        // Reserve physical block 0 as a dummy zero block (never allocated, omitted from pg_free_blocks)
-        if (pg_n_blocks > 1) {
-            pg_free_blocks.resize(pg_n_blocks - 1);
-            for (uint32_t i = 0; i < pg_n_blocks - 1; ++i) {
-                pg_free_blocks[i] = pg_n_blocks - 1 - i;
+        // Physical block 0 is the dummy zero block (pre-zeroed, never put in the free pool).
+        // The V tensor has kv_size+pg_block_size rows so blocks 1..pg_n_blocks are all
+        // usable — exactly pg_n_blocks physical blocks for pg_n_blocks logical pages.
+        if (pg_n_blocks > 0) {
+            pg_free_blocks.resize(pg_n_blocks);
+            for (uint32_t i = 0; i < pg_n_blocks; ++i) {
+                pg_free_blocks[i] = pg_n_blocks - i;   // LIFO: top=1, bottom=pg_n_blocks
             }
         } else {
             pg_free_blocks.clear();
@@ -407,11 +415,11 @@ void llama_kv_cache::clear(bool data) {
         }
     }
     if (pg_enabled) {
-        // Reserve physical block 0 as a dummy zero block (never allocated, omitted from pg_free_blocks)
-        if (pg_n_blocks > 1) {
-            pg_free_blocks.resize(pg_n_blocks - 1);
-            for (uint32_t i = 0; i < pg_n_blocks - 1; ++i) {
-                pg_free_blocks[i] = pg_n_blocks - 1 - i;
+        // Physical block 0 is the dummy zero block.  Pool has blocks 1..pg_n_blocks (LIFO).
+        if (pg_n_blocks > 0) {
+            pg_free_blocks.resize(pg_n_blocks);
+            for (uint32_t i = 0; i < pg_n_blocks; ++i) {
+                pg_free_blocks[i] = pg_n_blocks - i;
             }
         } else {
             pg_free_blocks.clear();
@@ -1564,13 +1572,10 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
         v_cur = ggml_view_2d(ctx, v_cur, n_embd_gqa, n_tokens, v_cur->nb[2], 0);
 
         if (n_stream > 1) {
-            const int64_t kv_size = get_size();
-
             assert(n_embd_gqa == v->ne[0]);
-            assert(kv_size    == v->ne[1]);
-
-            // merge the buffer across all streams because the idxs are global
-            v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
+            // v->ne[1] is kv_size + pg_block_size for paged attention (extra dummy block row)
+            // or kv_size for non-paged; use v->ne[1] directly to handle both cases.
+            v = ggml_reshape_2d(ctx, v, n_embd_gqa, v->ne[1]*n_stream);
         }
 
         ggml_tensor * result = ggml_set_rows(ctx, v, v_cur, v_idxs);

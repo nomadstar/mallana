@@ -170,6 +170,15 @@ has not yet been scheduled.
 | Weight + KV joint compression (TQ3_1S, TQ4_1S formats) | P4 | ⬜ Pending |
 | Cross-layer KV cache coordination | P4 | ⬜ Pending |
 | Benchmark automation and regression dashboard | P2 | ⬜ Pending |
+| Layer-wise inference / weight streaming (AirLLM-style) | P4 | ⬜ Pending |
+| Prefetch-compute overlap for layer streaming | P4 | ⬜ Pending |
+
+### Research OS Tooling
+
+| Task | Priority | Status |
+|---|---|---|
+| Integrate codebase-memory-mcp for agent code navigation | P3 | ⬜ Pending |
+| Persistent knowledge graph across multiswarm agent runs | P3 | ⬜ Pending |
 
 ---
 

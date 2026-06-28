@@ -317,6 +317,9 @@ on a validated foundation.
 - [ ] Multi-GPU paged attention
 - [ ] Zero-overhead FA dequant (eliminate gather)
 - [ ] Adaptive bit-width selection per layer
+- [ ] Layer-wise inference / weight streaming (AirLLM-style) — 70B on 4 GB VRAM without quantization
+- [ ] Prefetch-compute overlap for layer streaming
+- [ ] codebase-memory-mcp integration for Research OS agent navigation
 
 ---
 

@@ -1,7 +1,11 @@
 {
-    "baseline_ppl": 38805.0457,
-    "eviction_ppl": 38805.0457,
-    "page_budget": 4,
-    "context_len": 256,
-    "quality_retention_pct": 100.0
+    "baseline_ppl": 10.9552,
+    "eviction_ppl": 10.9552,
+    "page_budget": 32,
+    "context_len": 2048,
+    "total_pages": 64,
+    "budget_pct": 50.0,
+    "delta_ppl": 0.0,
+    "quality_retention_pct": 100.0,
+    "h6_1_pass": true
 }

@@ -139,7 +139,18 @@ Representative topics include:
 * CUDA Graphs
 * Memory-efficient tensor layouts
 * Asynchronous execution
+* Layer-wise inference and weight streaming (AirLLM)
 * Future execution optimizations
+
+### Layer-Wise Inference (Weight Streaming)
+
+When model weights exceed available VRAM, layer-by-layer execution is a practical alternative
+to quantization: each transformer layer is loaded from disk or CPU RAM, computed on GPU, then
+swapped out. This trades I/O bandwidth for VRAM headroom, enabling 70B models to run on 4 GB
+cards without quantization. The key research question is how to overlap weight prefetch with
+compute to minimize the I/O penalty.
+
+Reference implementation: [AirLLM](https://github.com/lyogavin/airllm).
 
 ---
 
@@ -221,10 +232,20 @@ To make this collaboration repeatable and rigorous, this repository implements a
 Different AI systems specialize in their respective roles:
 - **Architect**: Designs experiments, models physical/mathematical hypotheses, and sets explicit validation and rollback criteria.
 - **Implementer**: Applies minimal, scoped code patches without ad-hoc optimization or unilateral design changes.
-- **Validator**: Runs builds, benchmarks, and perplexity gates to verify improvements against the baseline, producing objective binary veredictoes.
+- **Validator**: Runs builds, benchmarks, and perplexity gates to verify improvements against the baseline, producing objective binary verdicts.
 - **Reviewer**: Audits designs and implementations as the "devil's advocate," attempting to actively refute the architect's hypothesis.
 
-This structured workflow is detailed in [RESEARCH.md](file:///home/ignatus/GitHub/llama-cpp-turboquant/RESEARCH.md) and governed by the prompts in `/prompts` and automation tools in `/scripts`. Through this framework, the human researcher remains responsible for scientific direction, vetoes, and final approval, while AI systems execute the iterative lifecycle.
+This structured workflow is detailed in [RESEARCH.md](RESEARCH.md) and governed by the prompts in `/prompts` and automation tools in `/scripts`. Through this framework, the human researcher remains responsible for scientific direction, vetoes, and final approval, while AI systems execute the iterative lifecycle.
+
+### Code Intelligence (Research OS Tooling)
+
+Effective AI-assisted research requires agents to navigate a large codebase efficiently without
+re-reading files repeatedly. A persistent knowledge graph — indexing functions, classes, call
+chains, and cross-file references — reduces token consumption and tool-call overhead for all
+participating agents.
+
+Reference implementation: [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)
+(tree-sitter AST analysis, 14 MCP tools, single binary, 120× fewer tokens vs file-by-file search).
 
 ---
 

@@ -32,6 +32,7 @@ RESET = "\033[0m"
 PLAN_FILE = ".multiswarm_plan.md"
 SUMMARY_FILE = ".multiswarm_summary.md"
 CRITIQUE_FILE = ".multiswarm_critique.md"
+AUDIT_FILE = ".multiswarm_audit.md"
 VALIDATION_LOG = ".multiswarm_validation.log"
 HISTORY_LOG = ".multiswarm_history.log"
 
@@ -323,6 +324,82 @@ def run_critique(task, iteration, validation_passed, validation_log, model=None,
         return False
     return True
 
+def run_audit(scope=None, model=None, agent=None, skip_permissions=False):
+    """Audit-only mode: opencode reviews the codebase or recent changes.
+
+    scope: optional string describing what to audit (e.g. "src/llama-kv-cache.cpp",
+           "recent changes", "Phase 2 Flash Attention page table"). Defaults to git diff
+           vs main branch.
+    """
+    diff_output = ""
+    try:
+        diff_res = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True)
+        staged_res = subprocess.run(["git", "diff", "--cached"], capture_output=True, text=True)
+        diff_output = diff_res.stdout + staged_res.stdout
+        if not diff_output.strip():
+            log_res = subprocess.run(
+                ["git", "diff", "origin/master...HEAD"],
+                capture_output=True, text=True,
+            )
+            diff_output = log_res.stdout
+    except Exception as e:
+        diff_output = f"Could not run git diff: {e}"
+
+    scope_desc = scope or "all recent changes (git diff vs HEAD and staged)"
+
+    prompt = (
+        f"You are the CODE AUDITOR for the llama-cpp-turboquant research project. "
+        f"Your task is to audit: **{scope_desc}**.\n\n"
+        f"Focus areas:\n"
+        f"1. **Correctness** — logic bugs, off-by-one errors, undefined behavior, incorrect math\n"
+        f"2. **Security** — no hardcoded credentials, no command injection, no unvalidated inputs\n"
+        f"3. **Performance** — unnecessary allocations, cache-unfriendly access patterns, GPU divergence\n"
+        f"4. **Documentation** — are complex invariants explained? Are bugs/workarounds annotated?\n"
+        f"5. **Test coverage** — are edge cases reachable by current tests?\n\n"
+    )
+    if diff_output.strip():
+        prompt += (
+            f"Here is the git diff to review:\n"
+            f"```diff\n{diff_output[:12000]}\n```\n\n"
+        )
+    else:
+        prompt += "No git diff available — review the overall codebase in the current directory.\n\n"
+    prompt += (
+        f"Write a structured markdown audit report to the file '{AUDIT_FILE}'. "
+        f"Structure the report as:\n"
+        f"# Code Audit Report\n"
+        f"## Summary\n"
+        f"## Findings (Severity: Critical / High / Medium / Low / Info)\n"
+        f"## Recommendations\n\n"
+        f"Be specific: include file names and line numbers where possible. "
+        f"If the code is clean in a given area, say so explicitly."
+    )
+
+    cmd = ["opencode", "run", prompt]
+    if model:
+        cmd.extend(["--model", model])
+    if agent:
+        cmd.extend(["--agent", agent])
+
+    print(f"\n{BOLD}{CYAN}=== AUDIT MODE: Code Review with opencode ==={RESET}")
+    print(f"Scope: {scope_desc}")
+    print(f"Executing: {format_cmd_display(cmd)}")
+    log_session(f"Starting audit, scope={scope_desc!r}")
+
+    res = run_with_output(cmd, prefix="OPENCODE")
+    if res.returncode != 0:
+        print(f"{RED}Audit failed (exit {res.returncode}).{RESET}")
+        return False
+    if not os.path.exists(AUDIT_FILE) or os.path.getsize(AUDIT_FILE) == 0:
+        print(f"{YELLOW}Warning: '{AUDIT_FILE}' was not created or is empty.{RESET}")
+        return False
+
+    print(f"\n{BOLD}{GREEN}=== Audit Report ==={RESET}")
+    with open(AUDIT_FILE) as f:
+        print(f.read())
+    return True
+
+
 def check_success():
     """Verify if the critique step declared success."""
     if not os.path.exists(CRITIQUE_FILE):
@@ -349,7 +426,13 @@ def parse_plan_task():
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Agent Swarm Orchestrator (Multiswarm)")
-    parser.add_argument("--task", required=True, help="The development task or bug to fix")
+    parser.add_argument("--task", help="The development task or bug to fix (required unless --audit)")
+    parser.add_argument("--audit", action="store_true",
+                        help="Audit-only mode: skip planning/implementation, run opencode code review on "
+                             "current diff and exit. Use --audit-scope to focus the review.")
+    parser.add_argument("--audit-scope",
+                        help="What to audit in --audit mode (e.g. 'src/llama-kv-cache.cpp Phase 2 FA fix'). "
+                             "Defaults to all staged + unstaged changes.")
     parser.add_argument("--iterations", type=int, default=3, help="Max iterations/loops (default: 3)")
     parser.add_argument("--skip-permissions", action="store_true", help="Auto-approve tool permissions (skip prompts)")
     parser.add_argument("--no-interactive", action="store_true", help="Run without asking for confirmation between phases")
@@ -365,6 +448,25 @@ def main():
     parser.add_argument("--agent-opencode", help="Custom agent for opencode")
     parser.add_argument("--cleanup", action="store_true", help="Delete temporary multiswarm files on completion")
     args = parser.parse_args()
+
+    # Audit-only mode: needs opencode only
+    if args.audit:
+        if not check_cli_tool("opencode"):
+            print(f"{RED}Error: 'opencode' not found in PATH.{RESET}")
+            sys.exit(1)
+        print(f"{BOLD}{CYAN}================================================================{RESET}")
+        print(f"{BOLD}{CYAN}                  MULTISWARM — AUDIT MODE                      {RESET}")
+        print(f"{BOLD}{CYAN}================================================================{RESET}")
+        ok = run_audit(
+            scope=args.audit_scope,
+            model=args.model_opencode,
+            agent=args.agent_opencode,
+            skip_permissions=args.skip_permissions,
+        )
+        sys.exit(0 if ok else 1)
+
+    if not args.task:
+        parser.error("--task is required unless --audit is specified")
 
     # Validate that CLI tools are installed
     missing_tools = []
