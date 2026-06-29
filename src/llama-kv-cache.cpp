@@ -1767,8 +1767,9 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, float * 
     std::fill(seq_pos_min, seq_pos_min + LLAMA_MAX_SEQ, INT32_MAX);
 
     for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        GGML_ASSERT(ubatch->n_seq_id[i] > 0 && "token must have at least one sequence id");
         const llama_seq_id seq_id = ubatch->seq_id[i][0];
-
+        GGML_ASSERT(seq_id >= 0 && (size_t)seq_id < seq_to_stream.size() && "seq_id out of bounds for seq_to_stream vector");
         seq_pos_min[seq_id] = std::min(seq_pos_min[seq_id], ubatch->pos[i]);
     }
 
@@ -2250,6 +2251,14 @@ void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t
 }
 
 void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const {
+    // Paged V layout is physically indirected through the page table; linear
+    // cell-offset reads would hit the dummy zero block instead of real data.
+    // State save/restore is not supported with paged attention.
+    if (pg_enabled) {
+        GGML_ABORT("state save/restore is not supported when paged attention is enabled (pg_enabled=true). "
+                   "Disable paging with LLAMA_NO_PAGING=1 to use state serialization.");
+    }
+
     const auto & cells = v_cells[cr.strm];
 
     const uint32_t v_trans = this->v_trans ? 1 : 0;
@@ -2470,6 +2479,12 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 }
 
 bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo) {
+    if (pg_enabled) {
+        LLAMA_LOG_ERROR("%s: state restore not supported with paged attention (pg_enabled=true); "
+                        "set LLAMA_NO_PAGING=1 to use state serialization\n", __func__);
+        return false;
+    }
+
     auto & cells = v_cells[strm];
 
     uint32_t v_trans;
