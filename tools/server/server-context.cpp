@@ -107,6 +107,14 @@ struct server_slot {
 
         const size_t cur_size = llama_state_seq_get_size_ext(ctx, id, 0);
 
+        // A zero size means sequence state serialization is unavailable (e.g.
+        // paged attention is enabled, pg_enabled=true); skip caching instead
+        // of writing an invalid/empty state.
+        if (cur_size == 0) {
+            SRV_WRN("%s", " - skipping prompt save: state serialization unavailable (paged attention enabled?)\n");
+            return;
+        }
+
         SRV_WRN(" - saving prompt with length %d, total state size = %.3f MiB\n",
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0));
 

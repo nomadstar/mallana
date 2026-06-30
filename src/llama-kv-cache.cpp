@@ -2190,6 +2190,14 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
 void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     GGML_UNUSED(flags);
 
+    // Symmetric guard to state_write(): if paging is active, state_write() wrote
+    // zero bytes, so there is nothing valid to read here either.
+    if (pg_enabled) {
+        LLAMA_LOG_ERROR("%s: state restore not supported with paged attention (pg_enabled=true); "
+                        "set LLAMA_NO_PAGING=1 to use state serialization\n", __func__);
+        return;
+    }
+
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
     uint32_t n_stream_cur;
@@ -2259,6 +2267,14 @@ void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t
 }
 
 void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const {
+    // Defense-in-depth: state_write() already skips this call when paging is
+    // enabled, but guard here too in case this is ever invoked directly.
+    if (pg_enabled) {
+        LLAMA_LOG_ERROR("%s: state save not supported with paged attention (pg_enabled=true); "
+                        "set LLAMA_NO_PAGING=1 to use state serialization\n", __func__);
+        return;
+    }
+
     const auto & cells = v_cells[cr.strm];
 
     const uint32_t v_trans = this->v_trans ? 1 : 0;

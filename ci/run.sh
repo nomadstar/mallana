@@ -480,11 +480,11 @@ function gg_run_qwen3_0_6b {
 
     # LLAMA_NO_PAGING=1: state save/restore is incompatible with paged V cache
     # (paged layout is page-table-indirected; linear reads would corrupt state).
-    # This fork enables paging by default when flash_attn is on; disable it here
-    # so CI tests can exercise the serialization path.
-    (time LLAMA_NO_PAGING=1 ./bin/llama-save-load-state --model ${model_q4_0} -ngl 10 -c 1024 -fa off --no-op-offload) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
+    # This fork enables paging by default only when flash_attn is on, so only
+    # the `-fa on` runs need it disabled to exercise the serialization path.
+    (time ./bin/llama-save-load-state --model ${model_q4_0} -ngl 10 -c 1024 -fa off --no-op-offload) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
     (time LLAMA_NO_PAGING=1 ./bin/llama-save-load-state --model ${model_q4_0} -ngl 10 -c 1024 -fa on  --no-op-offload) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
-    (time LLAMA_NO_PAGING=1 ./bin/llama-save-load-state --model ${model_q4_0} -ngl 99 -c 1024 -fa off                ) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
+    (time ./bin/llama-save-load-state --model ${model_q4_0} -ngl 99 -c 1024 -fa off                ) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
     (time LLAMA_NO_PAGING=1 ./bin/llama-save-load-state --model ${model_q4_0} -ngl 99 -c 1024 -fa on                 ) 2>&1 | tee -a $OUT/${ci}-save-load-state.log
 
     function check_ppl {

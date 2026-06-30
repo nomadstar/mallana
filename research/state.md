@@ -1,6 +1,6 @@
 # Research State (Estado de la Investigación)
 
-*Última actualización: 2026-06-27*
+*Última actualización: 2026-06-30*
 
 Este archivo representa el estado vivo del conocimiento en este repositorio. Cualquier sistema de IA debe leer esto antes de proponer hipótesis o escribir código, y actualizarlo al finalizar un experimento.
 
@@ -47,6 +47,17 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 - **Implementación**: Presupuesto configurable de páginas físicas (`--triattention-page-budget`), bloque físico 0 reservado como dummy zero block y `pg_score_and_evict()` para desalojar la página de menor score usando productos punto sobre K con RoPE inverso. La fix pass de M006 corrigió el uso de `rope_freq_base`/`rope_freq_scale` efectivos en `get_unrotated_key()` y habilitó enforcement del presupuesto también durante prefill.
 - **Resultado**: Implementado, corregido frente a los issues P1/P3 de la crítica y compatible con modelos YaRN/NTK-aware en escenarios single-sequence. Pendiente de validación numérica de calidad/perplexity.
 
+### 8. Guarda de Serialización de Estado bajo Paged Attention (`pg_enabled`)
+- **Problema**: El layout de V paginado está indirectamente referenciado a través de la tabla de páginas; una lectura lineal (como la que usa `state_write_data()`/`state_read_data()`) corrompería el estado serializado.
+- **Implementación**: Capas de defensa simétricas:
+  1. `llama_kv_cache::state_write()` (`src/llama-kv-cache.cpp:2134`) retorna con `LLAMA_LOG_ERROR` cuando `pg_enabled==true`, sin escribir ningún byte al IO.
+  2. `llama_kv_cache::state_read()` (`src/llama-kv-cache.cpp:2190`) tiene la misma guarda simétrica: retorna con `LLAMA_LOG_ERROR` antes de intentar leer del IO (evita parsear un stream vacío/inválido cuando `state_write` no escribió nada).
+  3. `state_write_data()` y `state_read_data()` repiten la guarda como defensa en profundidad en caso de invocación directa que saltee los wrappers.
+- **Flujo de `get_size`**: `llama_state_seq_get_size_ext()` llama internamente a `state_write()` con un IO dummy. Si `state_write()` retorna tempranamente (0 bytes escritos), `get_size` devuelve `0`.
+- **Server-side**: `server_slot::prompt_save()` (`tools/server/server-context.cpp:105`) verifica `cur_size == 0` antes de llamar `llama_state_seq_get_data_ext()` y omite el guardado en caché con un log de advertencia.
+- **Workaround CI**: Las líneas de `ci/run.sh` que prueban `llama-save-load-state -fa on` anteponen `LLAMA_NO_PAGING=1` para deshabilitar paging y verificar la ruta de serialización con flash attention activo.
+- **Resultado**: La serialización de estado es una ruta **no soportada** bajo paged attention. Es una ruta **soportada y validada en CI** con `LLAMA_NO_PAGING=1` o con Flash Attention apagado.
+
 ---
 
 ## ❌ Caminos Rechazados o Problemáticos (Known Bad / Rejected)
@@ -67,6 +78,22 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 ### 4. Paging y fallback SDPA en simultáneo
 - **Rechazado porque**: Si Flash Attention se auto-desactiva (por dimensiones de cabezal incompatibles), el fallback de SDPA requiere que `v_trans=true`, lo cual es incompatible con el layout del pool de páginas.
 - **Decisión**: Si FA se desactiva, la paginación se desactiva automáticamente para evitar crashes.
+
+---
+
+## 🚦 Estado de CI y Problemas Conocidos (CI Status / Known Issues)
+
+- **`ci/run.sh` — `llama-save-load-state`**: Las dos invocaciones con `-fa on` (`-ngl 10` y `-ngl 99`) se ejecutan con `LLAMA_NO_PAGING=1` porque el paging se activa automáticamente con Flash Attention, y la serialización de estado no es compatible con el layout paginado (ver [Sección 8](#8-guarda-de-serialización-de-estado-bajo-paged-attention-pg_enabled)). Las dos invocaciones con `-fa off` no necesitan la variable porque el paging nunca se activa sin FA.
+  - **Causa raíz**: layout de V paginado indirecto vía tabla de páginas; lecturas/escrituras lineales en `state_write_data()`/`state_read_data()` asumen un pool contiguo.
+  - **Estado**: Mitigado vía guarda explícita (no crash, no estado corrupto silencioso) + override de entorno para CI.
+
+---
+
+## 🔍 Trabajo de Revisión Pendiente Antes del Próximo Hito
+
+- [ ] Evaluar si exponer `pg_enabled` (o un helper equivalente) en la API pública de `llama.h`/`llama_memory_*` para que clientes como `tools/server` puedan detectar el modo paginado sin depender del side-channel `size == 0` de `llama_state_seq_get_size_ext()`.
+- [ ] Decidir si `llama_context::state_seq_get_size()`/`get_data()` deberían distinguir explícitamente "tamaño 0 por paging" de "tamaño 0 por error real" (hoy ambos casos colapsan al mismo valor de retorno).
+- [ ] Revisar otros llamadores de `state_write()`/`state_read()` fuera de `tools/server` (p. ej. `llama-save-load-state`, bindings externos) para confirmar que todos manejan con gracia el caso `pg_enabled=true`.
 
 ---
 
