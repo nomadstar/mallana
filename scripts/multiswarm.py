@@ -598,6 +598,9 @@ def main():
     parser.add_argument("--force-use-plan", action="store_true", help="Use existing plan even if its task field does not match --task")
     parser.add_argument("--implementer", default="claude", choices=["claude", "agy"],
                         help="Tool used as implementer in Phase 2 (default: claude)")
+    parser.add_argument("--agy-print-timeout", default=AGY_PRINT_TIMEOUT_DEFAULT,
+                        help=f"agy --print-timeout value for planning/implementation phases "
+                             f"(agy's own hardcoded default is 5m, too short for builds; default here: {AGY_PRINT_TIMEOUT_DEFAULT})")
     parser.add_argument("--model-agy", help="Model override for agy")
     parser.add_argument("--model-claude", help="Model override for claude (ignored when --implementer=agy)")
     parser.add_argument("--model-implementer", help="Model override for the implementer tool (takes precedence over --model-claude)")
@@ -709,7 +712,8 @@ def main():
             print(f"\n{BOLD}{CYAN}=== Phase 1: Planning (Reusing Existing Plan) ==={RESET}")
             print(f"Reusing existing plan from '{PLAN_FILE}'")
         else:
-            if not run_planning(args.task, iteration, critique, args.model_agy, args.skip_permissions, args.continue_session):
+            if not run_planning(args.task, iteration, critique, args.model_agy, args.skip_permissions, args.continue_session,
+                                 args.agy_print_timeout):
                 print(f"{RED}Planning failed in iteration {iteration}. Aborting.{RESET}")
                 break
 
@@ -725,7 +729,8 @@ def main():
 
         # Step 2: Implementation
         impl_model = args.model_implementer or (None if args.implementer == "agy" else args.model_claude)
-        if not run_implementation(args.task, iteration, impl_model, args.skip_permissions, args.continue_session, args.implementer):
+        if not run_implementation(args.task, iteration, impl_model, args.skip_permissions, args.continue_session, args.implementer,
+                                   args.agy_print_timeout):
             print(f"{RED}Implementation failed in iteration {iteration}. Aborting.{RESET}")
             break
 
