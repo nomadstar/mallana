@@ -2,6 +2,10 @@
   <img src="assets/mallana-logo.png" alt="Mallana" width="360">
 </p>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="demo" width="600">
+</p>
+
 # Mallana — Building tomorrow’s llama.cpp.
 
 > Advanced KV cache compression for llama.cpp with validated CPU and GPU implementations.

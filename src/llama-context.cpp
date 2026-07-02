@@ -1183,15 +1183,19 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
+    // The previous graph_compute_async may still be running on the GPU (it returns to the host
+    // immediately after enqueueing). We must synchronize before set_inputs / graph
+    // rebuild-and-alloc below overwrite/reuse the same buffers the still-in-flight
+    // previous-ubatch kernels may be reading, e.g. corrupting a still-being-read PagedAttention
+    // page table mid-kernel. This used to be limited to the graph-reuse branch, gated behind
+    // cparams.pipeline_parallel, on the (incorrect) theory that async in-flight compute across
+    // ubatches only happens with pipeline parallelism — but ggml_backend_sched_graph_compute_async
+    // is always asynchronous (single-GPU included), and ggml_backend_sched_reset/alloc_graph in
+    // the rebuild branch don't synchronize either, so the hazard applies unconditionally.
+    ggml_backend_sched_synchronize(sched.get());
+
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
-
-        // with pipeline parallelism, the previous graph_compute_async may still be running
-        // on the GPU. we must synchronize before set_inputs to avoid overwriting input tensors
-        // that the previous compute is still reading.
-        if (cparams.pipeline_parallel) {
-            ggml_backend_sched_synchronize(sched.get());
-        }
 
         n_reused++;
     } else {

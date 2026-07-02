@@ -24,12 +24,12 @@
 | Repo detached from `atomicmilkshake/llama-cpp-turboquant` fork network, renamed to `nomadstar/mallana` | ✅ |
 | Phase 2 FA tensor-graph wiring hardened (recursive DFS + explicit abort; H1 ruled out empirically) | ✅ |
 | multiswarm.py: live build/compile progress from `/proc`, pause-until-build-done, agy `--print-timeout` fix | ✅ |
+| **Paged Attention Phase 2 — fixed.** Root cause was a missing scheduler synchronization (`llama_context::process_ubatch`), not the FA kernel's V-addressing math; see below and `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-02 update). | ✅ |
 
 ### Upcoming
 
 | Milestone | Priority |
 |---|---|
-| **Paged Attention Phase 2 — PPL=35125+ bug, root cause still open** (see below) | P1 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |
@@ -129,7 +129,7 @@ on a validated foundation.
 | `LLAMA_NO_PAGING` env var gate | P1 | ✅ |
 | Fix device sync race in paged KV write | P1 | ✅ |
 | Fix K-cache isolation (flat pool indices) | P1 | ✅ |
-| Phase 2: Native paged FA — PPL=35125-38849 with `-fa on`+paging (baseline ~9.7). Tensor-graph wiring, page-table address math, and write/read row agreement all verified correct with empirical evidence (raw pool bytes at the resolved physical row are real, non-garbage data). Bug is downstream in the kernel compute path — see `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-01 update) for ruled-out hypotheses and next leads (`flash_attn_mask_to_KV_max`, gqa_ratio/mask-stride in the paged branch). | P1 | 🔴 Blocked |
+| Phase 2: Native paged FA — **fixed 2026-07-02.** Root cause was a missing `ggml_backend_sched_synchronize()` in `llama_context::process_ubatch` (`src/llama-context.cpp`): the sync that guards against the previous ubatch's still-in-flight async kernels reading input buffers concurrently with the next ubatch's `set_inputs()` overwriting them was gated behind `cparams.pipeline_parallel`, but the same write-after-read hazard exists on single-GPU too (`ggml_backend_sched_graph_compute_async` always returns before the GPU work completes). The page table (`v_ptable`) is uniquely sensitive to this because, unlike K/V cache cells (append-only, non-overlapping ranges across ubatches), it is fully overwritten on every ubatch at the same address — so a still-running previous-ubatch FA kernel could read a torn/stale page table mid-kernel, producing a garbage physical block index and an out-of-bounds V pool read. Fixed by making the sync unconditional. PPL now correct (~9.7-12.3, matching baseline) under normal (non-blocking) execution for both the VEC and TILE kernels, with and without CUDA graphs, verified with `compute-sanitizer --tool memcheck` (0 errors). Also added a defensive `k_abs < k_max` bounds guard in `v_paged_ptr` (`fattn-common.cuh`) for the tail-tile case, and paging-aware VEC/TILE kernel routing in `fattn.cu` (tensor-core kernels ignore `v_ptable` and silently read the wrong rows when paged). See `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-02 update) for the full diagnostic trail. | P1 | ✅ |
 | Phase 3: TriAttention KV eviction (H6.1 pending gen-mode eval) | P4 | 🔄 Implemented |
 | Phase 4: TurboQuant-aware block alignment | P2 | ⬜ Pending |
 | Sliding window support | P2 | ⬜ Pending |
@@ -193,19 +193,17 @@ has not yet been scheduled.
 
 ## Immediate Next Steps
 
-1. **[P1] Continue Phase 2 paged FA debugging.** Root cause is not the tensor-graph
-   wiring, not the page-table address math, and not a write/read row mismatch — all
-   three were empirically disproven (see `research/milestone-008/phase2-fa-debug-handoff.md`,
-   2026-07-01 update). Next: instrument `flash_attn_mask_to_KV_max`
-   (`ggml/src/ggml-cuda/fattn-common.cuh`) and the gqa_ratio/mask-stride handling in the
-   paged branch of `build_attn` (`src/llama-graph.cpp` ~2130-2183), comparing against the
-   working `-fa off` path with the same prompt. Use empirical probes (printed/dumped real
-   values), not static reading alone — that already produced two plausible-but-wrong
-   hypotheses this round.
-2. **H6.1 generation-mode evaluation**: `scripts/triattention_generation_eval.py` is written;
-   run it once Phase 2 paged FA is fixed (it depends on `-fa on` + paging being correct).
+1. **[P1] Audit other `ggml_backend_sched_reset`/graph-rebuild call sites for the same
+   missing-synchronization pattern.** The fix in `llama_context::process_ubatch` covers the
+   ubatch decode path; confirm there isn't an equivalent gap in other places that call
+   `ggml_backend_sched_reset` + `ggml_backend_sched_alloc_graph` back-to-back without a prior
+   `ggml_backend_sched_synchronize` (e.g. state save/restore, batch re-decode after a
+   context-shift). Low urgency since those paths don't share the paged-attention full-overwrite
+   pattern, but worth a pass.
+2. **H6.1 generation-mode evaluation**: `scripts/triattention_generation_eval.py` is written
+   and unblocked now that Phase 2 paged FA is fixed — run it.
 3. **Large-scale benchmarks**: Systematic benchmark harness across multiple GPUs, model
-   sizes, and context lengths. Blocked on Phase 2 FA fix for the `-fa on` numbers.
+   sizes, and context lengths. Unblocked now that Phase 2 FA is fixed.
 4. **Upstream synchronization**: Rebase against latest `ggml-org/llama.cpp` master to
    incorporate upstream fixes and features.
 5. **Expand validation**: Add more model families to the validation suite (Gemma, Mistral,

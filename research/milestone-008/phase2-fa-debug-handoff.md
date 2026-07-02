@@ -1030,3 +1030,177 @@ no es representativo de uso real.
    de ruteo, para cuando `can_use_vector_kernel` es falso) tiene el mismo
    problema o no — no se probó en esta ronda porque este workload siempre
    cae en la rama VEC.
+
+---
+
+## 2026-07-02 update: root cause found and fixed — NOT a kernel arithmetic bug
+
+Siguiendo el "próximo paso recomendado" de arriba (`-lineinfo` +
+`compute-sanitizer --tool memcheck`), se ubicó la línea exacta del acceso
+inválido y se encontró que el bug real es completamente distinto de lo que
+sugería la hipótesis original del plan ("tail tile de `k_VKQ_0` excede
+`ne11`"). Esa hipótesis era plausible pero **incorrecta**; quedó descartada
+empíricamente y reemplazada por la causa real, documentada abajo con
+evidencia reproducible.
+
+### Paso 0: el fix defensivo de bounds SÍ se aplicó, pero no fue suficiente
+
+Se implementó igualmente el guard de bounds descrito en el plan, por ser
+correcto en sí mismo (protege contra el caso de tile final real):
+
+- `ggml/src/ggml-cuda/fattn-common.cuh`: `v_paged_ptr` ahora recibe
+  `k_max` y devuelve el bloque dummy (`pblock=0`) cuando `k_abs >= k_max`,
+  en vez de indexar `v_ptable` con un `lpage` fuera de rango.
+- `ggml/src/ggml-cuda/fattn-vec.cuh`: los 7 call-sites de `v_paged_ptr`
+  ahora pasan `k_VKQ_max` (ya estaba en scope, es el límite real del loop
+  de KV) como `k_max`.
+- `ggml/src/ggml-cuda/fattn-tile.cuh`: ambos overloads de
+  `flash_attn_tile_load_tile_paged` (half2 y float) ahora aceptan y
+  propagan `k_max`; el caller en `flash_attn_tile_iter` pasa `k_VKQ_max`.
+
+Con este fix aplicado y compilado en Release (sin macros diag), el crash
+**seguía ocurriendo** exactamente igual, sin `CUDA_LAUNCH_BLOCKING=1` —
+confirmando que el bounds guard, aunque correcto y necesario, no era la
+causa del crash reportado.
+
+### Paso 1: localización exacta con `-lineinfo` + `compute-sanitizer`
+
+Compilando con `-DCMAKE_CUDA_FLAGS="-lineinfo"` y corriendo
+`compute-sanitizer --tool memcheck` (sin `CUDA_LAUNCH_BLOCKING`,
+`--chunks 2`), el sanitizer ubicó el read inválido con precisión de línea:
+
+```
+Invalid __global__ read of size 16 bytes
+  at ggml_cuda_memcpy_1<16,0>+0x6560 in common.cuh:787
+  Device Frame: v_paged_ptr(...)+0x6560 in fattn-common.cuh:563
+  Device Frame: flash_attn_ext_vec<128,2,F16,F16,false>+0x6330 in fattn-vec.cuh:634
+by thread (0,0,0) in block (0,0,0)
+Access to 0x8f1cb8700000 out of bounds, ~1.68e13 bytes past the pool allocation (8 MiB)
+```
+
+Punto clave: el thread que falla es **(0,0,0) del block (0,0,0)** — es
+decir, `sequence=0`, `k_abs=0` (la primerísima posición KV, la más trivial
+posible). Esto descarta por completo la hipótesis de "tail tile":
+el bug ocurre incluso en la posición más temprana y más claramente dentro
+de rango, no en el borde final del loop.
+
+Además: con `--chunks 1` (una sola ubatch, sin segunda pasada de decode)
+el mismo binario, sin sanitizer y sin `CUDA_LAUNCH_BLOCKING`, **no
+crashea**. El crash sólo aparece a partir de `--chunks 2` — es decir,
+requiere una **segunda llamada a `llama_decode`** reutilizando el mismo
+contexto/KV-cache. Esto apunta a un problema de *timing entre llamadas*,
+no a una fórmula de direccionamiento incorrecta dentro del kernel.
+
+### Paso 2: instrumentación con `TURBO_DIAG_PAGE_ROWS` + `TURBO_DIAG_FA_PAGED` + `TURBO_DIAG_KQ`
+
+Compilando con esas tres macros y comparando la tabla de páginas
+efectivamente escrita en el host (`[PTSET#1] ... ptable=[1,2,...,8,17,...,24,
+9,...,16,25,...,32]`, con `ns=2`, `n_lpage=16`) contra lo que el kernel leía
+en runtime, se observó que — en la corrida que crashea — el kernel leía
+`seq=1, lpage=0 → pblock=17`, cuando la tabla correcta indica que
+`seq=1, lpage=0` debería mapear a **9** (`17` es el valor correcto de
+`seq=0, lpage=8`, es decir, el elemento en el índice plano `8`, no `16`).
+Esto es exactamente lo que se obtiene si el kernel usara un stride de fila
+(`v_ptable_ne0`) **stale de una ubatch anterior** (`n_lpage=8` en vez de
+`16`) sobre el buffer **ya sobrescrito** con la tabla nueva de 16 columnas:
+`idx = seq*8 + lpage = 1*8 + 0 = 8 → ptable_nuevo[8] = 17`. Coincide al
+byte con el valor corrupto observado.
+
+### Paso 3: causa raíz confirmada en `src/llama-context.cpp`
+
+`llama_context::process_ubatch` tiene una rama de "graph reuse" (cuando la
+topología del grafo no cambia entre ubatches, común en decode con forma
+estable) con este comentario y guard **preexistentes**:
+
+```cpp
+// with pipeline parallelism, the previous graph_compute_async may still be running
+// on the GPU. we must synchronize before set_inputs to avoid overwriting input tensors
+// that the previous compute is still reading.
+if (cparams.pipeline_parallel) {
+    ggml_backend_sched_synchronize(sched.get());
+}
+```
+
+El comentario identifica correctamente el hazard (write-after-read entre
+el compute async de la ubatch anterior y el `set_inputs()` de la
+siguiente), pero el guard `if (cparams.pipeline_parallel)` es demasiado
+restrictivo: `ggml_backend_sched_graph_compute_async` siempre es
+asíncrono — con o sin pipeline parallelism, con o sin CUDA graphs — así
+que el hazard existe igual en single-GPU. Peor aún: la rama de
+**rebuild** de grafo (`else` — cuando la topología cambia) llama
+`ggml_backend_sched_reset()` + `ggml_backend_sched_alloc_graph()` **sin
+ninguna sincronización**, así que el mismo hazard existe también ahí.
+
+`CUDA_LAUNCH_BLOCKING=1` "arregla" el bug porque fuerza a que cada
+lanzamiento de kernel bloquee al host hasta completarse, serializando de
+facto todo el pipeline y eliminando la ventana de carrera — por eso el PPL
+siempre daba bien bajo esa variable de entorno, y por eso el bug parecía
+imposible de reproducir en el modo de validación usado en rondas
+anteriores.
+
+El tensor de página (`v_ptable`) es especialmente sensible a este hazard
+porque, a diferencia de las celdas K/V del KV-cache (que sólo se
+*agregan* en rangos nuevos y no-solapados en cada ubatch), se
+**sobrescribe por completo** en cada ubatch, en la misma dirección de
+memoria (buffer reusado). Si los kernels de la ubatch anterior todavía
+están en vuelo cuando el host escribe la tabla nueva, un thread puede leer
+una mezcla torn de datos viejos/nuevos — produciendo un índice de bloque
+físico arbitrario y, por ende, un read fuera de rango del pool de V.
+
+### Fix aplicado
+
+`src/llama-context.cpp`, `llama_context::process_ubatch`: se movió
+`ggml_backend_sched_synchronize(sched.get())` fuera del `if
+(cparams.pipeline_parallel)` y del branch de reuse, para que se ejecute
+**incondicionalmente** antes de la rama reuse/rebuild, cubriendo ambos
+casos.
+
+### Validación (sin `CUDA_LAUNCH_BLOCKING=1`, condición de ejecución normal)
+
+Todas las corridas siguientes son sin `CUDA_LAUNCH_BLOCKING=1`:
+
+- VEC kernel (ruteo default), `-fa on --triattention-page-budget 16
+  -c 512 --chunks 10`, con `GGML_CUDA_GRAPHS=ON` (build de producción) y
+  con `GGML_CUDA_GRAPHS=OFF`: **PPL = 12.2909**, sin crash, reproducido 2x.
+- TILE kernel forzado (vía macro `TURBO_DIAG_FORCE_TILE` en `fattn.cu`,
+  sólo para esta prueba), mismos flags: **PPL = 12.2886**, sin crash.
+- `compute-sanitizer --tool memcheck` sobre el binario con el fix,
+  `--chunks 3`: **0 errores**, PPL = 9.1185 (consistente con baseline).
+- Baselines de comparación, sin cambios: `LLAMA_NO_PAGING=1 -fa on` y
+  `-fa on` (paginado) ambos corren limpio; `-fa off` (gather) también.
+- Sanity default (sin flags de paginación en absoluto), `--chunks 5`:
+  PPL = 9.7241 — dentro del rango baseline esperado (~9.7-12.3),
+  confirmando que el fix de sincronización no rompe el path no-paginado.
+
+### Nota sobre la comparación gather-vs-paged V-byte pedida originalmente
+
+Se confirma lo ya documentado en rondas anteriores: bajo el wiring actual
+de CLI, `-fa off` no construye ni usa `self_v_page_table`
+(`pg_enabled=false` en `llama-kv-cache.cpp`), por lo que el código
+paged/gather (incluyendo `ggml_gather_paged_v`) nunca se ejecuta con
+`-fa off`. Por lo tanto, **no es posible** comparar bytes leídos por el
+kernel paged FA contra el kernel gather para las mismas coordenadas
+lógicas usando `-fa off` como referencia — es una limitación estructural
+del CLI actual, no un bug. La comparación válida "mismo kernel, A/B" sigue
+siendo `-fa on` con paginación vs `LLAMA_NO_PAGING=1 -fa on` (ambos
+ejercitan el mismo kernel `flash_attn_ext_vec`/TILE, sólo difieren en si
+`v_ptable` es no-nulo), y ambos casos ya están validados arriba con PPL
+correcto. Si en el futuro se requiere una comparación byte-a-byte real
+entre el path de gather explícito (`ggml_gather_paged_v`) y el paged-FA
+directo, haría falta un harness de prueba dedicado que invoque ambos
+kernels fuera del wiring condicional de `-fa`, ya que el CLI actual no
+ofrece una combinación de flags que ejercite ambos con el mismo prompt.
+
+### Estado final
+
+- **Bug resuelto.** PPL correcto (~9.7-12.3) en ejecución normal (sin
+  `CUDA_LAUNCH_BLOCKING=1`), verificado para VEC y TILE, con y sin CUDA
+  graphs, y bajo `compute-sanitizer --tool memcheck` (0 errores).
+- Archivos modificados esta ronda: `src/llama-context.cpp` (fix real:
+  sync incondicional en `process_ubatch`), `ggml/src/ggml-cuda/fattn.cu`
+  (ruteo paging-aware VEC/TILE + hook de test `TURBO_DIAG_FORCE_TILE`,
+  guardado tras macro, inerte por default), `ggml/src/ggml-cuda/fattn-common.cuh`
+  (`v_paged_ptr` bounds guard `k_abs < k_max`), `ggml/src/ggml-cuda/fattn-vec.cuh`
+  y `fattn-tile.cuh` (propagación de `k_max` a todos los call-sites).
+- `docs/roadmap.md`: actualizado — Phase 2 paged FA marcado como
+  resuelto, con referencia a este documento para el detalle técnico.

@@ -471,6 +471,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // research/milestone-008/phase2-fa-debug-handoff.md round 4. Route around it by
     // forcing a paging-aware kernel whenever a page table is attached (dst->src[5]).
     if (dst->src[5] != nullptr) {
+#if defined(TURBO_DIAG_FORCE_TILE)
+        return BEST_FATTN_KERNEL_TILE;
+#endif
         if (can_use_vector_kernel) {
             return BEST_FATTN_KERNEL_VEC;
         }
