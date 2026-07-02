@@ -40,7 +40,8 @@ This fork extends the original work significantly:
 - **TriAttention** — KV cache eviction via RoPE-inverted key scoring.
 
 All existing llama.cpp quantization types, model architectures, and backends continue to work
-unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
+unchanged (when using standard quantization types). TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
+Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Other backends (like Vulkan, SYCL, WebGPU) do not yet support TurboQuant and will trigger errors or fallbacks if TurboQuant is enabled on them.
 
 ---
 
@@ -219,7 +220,7 @@ KV Cache (per layer)
     └─ Value cache ──► turboN / q8_0
                            │
                            ▼
-    WHT Rotation (pre-computed R / R^T matrices)
+    WHT Rotation (sign-flip → FWHT → sign-flip)
                            │
                            ▼
     Quantization (polar codebook, 2/3/4 bit)
@@ -236,7 +237,7 @@ KV Cache (per layer)
   Flash Attention (on-the-fly K/V dequantization)
                            │
                            ▼
-  KV Cache  ◄── Inverse WHT rotation (attention output)
+  KV Cache  ◄── Inverse WHT rotation (sign-flip → FWHT → sign-flip)
                            │
                            ▼
                       Inference

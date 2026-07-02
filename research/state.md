@@ -1,6 +1,6 @@
 # Research State (Estado de la Investigación)
 
-*Última actualización: 2026-06-30*
+*Última actualización: 2026-07-02*
 
 Este archivo representa el estado vivo del conocimiento en este repositorio. Cualquier sistema de IA debe leer esto antes de proponer hipótesis o escribir código, y actualizarlo al finalizar un experimento.
 
@@ -37,7 +37,8 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 
 ### 5. Paged Attention Fase 2 (Native Paged FA)
 - **Implementación**: Integración de búsqueda en tabla de páginas directamente dentro de los kernels VEC y TILE de Flash Attention mediante `v_paged_ptr()`. Elimina el gather intermedio. API `ggml_flash_attn_ext_set_page_table()` para adjuntar tabla de páginas vía `src[5]`. Stubs ABI para kernels MMA-f16 y WMMA-f16.
-- **Resultado**: Código compilado. Pendiente de validación numérica y benchmark de latencia.
+- **Resultado**: ✅ Corregido el 2026-07-02. Se resolvieron dos bugs independientes de correctitud de perplejidad (PPL): (1) bug de direccionamiento/despacho en kernels FA (MMA_F16/WMMA_F16 ignoraban la page table y leían direcciones contiguas; corregido enrutando a VEC/TILE cuando hay page table adjunta en `fattn.cu`), y (2) race condition por sincronización omitida en `llama_context::process_ubatch` (el scheduler reusaba la tabla de páginas sobreescrita por el ubatch activo antes de que el kernel asíncrono anterior terminara de leer; corregido haciendo la sincronización del backend incondicional antes del reset del grafo).
+- **Brecha de validación pendiente**: Falta realizar la comparación byte a byte (byte-level V-pool comparison) para `sequence >= 1` entre paged (`-fa on`) y gather (`-fa off`), aunque la perplejidad (PPL) ya coincide plenamente con el baseline.
 
 ### 6. ROCm/HIP Backend Completion
 - **Implementación**: Compatibilidad HIP completada para shuffles de warp y ballot en los caminos de SET_ROWS y Flash Attention. `__shfl_xor_sync` ajustado al formulario de 4 argumentos con `WARP_SIZE`; `__ballot_sync` actualizado para wavefront AMD de 64 hilos.
@@ -45,7 +46,8 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 
 ### 7. TriAttention KV Eviction
 - **Implementación**: Presupuesto configurable de páginas físicas (`--triattention-page-budget`), bloque físico 0 reservado como dummy zero block y `pg_score_and_evict()` para desalojar la página de menor score usando productos punto sobre K con RoPE inverso. La fix pass de M006 corrigió el uso de `rope_freq_base`/`rope_freq_scale` efectivos en `get_unrotated_key()` y habilitó enforcement del presupuesto también durante prefill.
-- **Resultado**: Implementado, corregido frente a los issues P1/P3 de la crítica y compatible con modelos YaRN/NTK-aware en escenarios single-sequence. Pendiente de validación numérica de calidad/perplexity.
+- **Resultado**: Implementado, corregido frente a los issues P1/P3 de la crítica y compatible con modelos YaRN/NTK-aware en escenarios single-sequence.
+- **Recomendación de validación**: No alterar la implementación hasta cerrar la calibración y validación del hito M007 usando un test de evaluación en modo de generación (generation-mode). La métrica mínima exigida es comparar baseline vs un budget del 50%, manteniendo la misma semilla y el mismo prompt largo, para evaluar la perplejidad y la retención de calidad (generation retention).
 
 ### 8. Guarda de Serialización de Estado bajo Paged Attention (`pg_enabled`)
 - **Problema**: El layout de V paginado está indirectamente referenciado a través de la tabla de páginas; una lectura lineal (como la que usa `state_write_data()`/`state_read_data()`) corrompería el estado serializado.
@@ -108,7 +110,7 @@ Las siguientes técnicas e implementaciones están demostradas, optimizadas y ba
 ## 📋 Lista de Tareas Pendientes (TODO)
 
 - [x] Completar Hito 003 Fase 2 (Native Paged FA — implementación)
-- [ ] Validación GPU numérica Hito 003 (comparación Phase 2 vs Phase 1 vs baseline no-paged)
+- [x] Validación GPU numérica Hito 003 (PPL correcto verificado en VEC/TILE; pendiente el gap de comparación byte-level)
 - [ ] Benchmark de latencia Hito 003 (contextos >8K tokens)
 - [x] Ejecutar validación de NaN en `turbo4` (Hito 004)
 - [x] Portar los kernels de `turbo4` a HIP/ROCm
