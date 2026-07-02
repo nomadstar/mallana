@@ -1,4 +1,4 @@
-# llama.cpp TurboQuant
+# Mallana — Building tomorrow’s llama.cpp.
 
 > Advanced KV cache compression for llama.cpp with validated CPU and GPU implementations.
 > Walsh-Hadamard rotated polar codebook quantization for long-context LLM inference.
