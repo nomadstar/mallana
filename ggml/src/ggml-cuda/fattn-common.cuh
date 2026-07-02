@@ -63,6 +63,12 @@ static __device__ __forceinline__ const char * v_paged_ptr(
         const int32_t lpage  = k_abs / bs;
         const int32_t within = k_abs % bs;
         const int32_t pblock = v_ptable[seq * n0 + lpage];
+#if defined(TURBO_DIAG_PAGE_ROWS)
+        if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k_abs < 8) {
+            printf("[PAGE_READ] seq=%d k_abs=%d lpage=%d within=%d pblock=%d phys_row=%lld\n",
+                   seq, k_abs, lpage, within, pblock, (long long)((int64_t)pblock * bs + within));
+        }
+#endif
         return V_base + ((int64_t)pblock * bs + within) * nb21;
     }
     return V_base + (int64_t)k_abs * nb21;
@@ -1658,6 +1664,19 @@ void launch_fattn(
             fprintf(stderr, "\n[PAGED_FA_DIAG] V.ne=[%lld,%lld,%lld,%lld] V.nb=[%zu,%zu,%zu,%zu]\n",
                     (long long)V->ne[0], (long long)V->ne[1], (long long)V->ne[2], (long long)V->ne[3],
                     V->nb[0], V->nb[1], V->nb[2], V->nb[3]);
+            // Dump raw pool bytes at physical row 0 (dummy sentinel) and row 32
+            // (block 1, where lpage=0 should have been written) to see whether
+            // real data actually landed at the resolved physical address.
+            {
+                half row0[8], row32[8];
+                CUDA_CHECK(cudaMemcpy(row0,  V_data + 0,       sizeof(row0),  cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(row32, V_data + 32*nb21, sizeof(row32), cudaMemcpyDeviceToHost));
+                fprintf(stderr, "[PAGED_FA_DIAG] pool row0[0..7]:  ");
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%g ", __half2float(row0[i]));
+                fprintf(stderr, "\n[PAGED_FA_DIAG] pool row32[0..7]: ");
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%g ", __half2float(row32[i]));
+                fprintf(stderr, "\n");
+            }
         }
     }
 #endif

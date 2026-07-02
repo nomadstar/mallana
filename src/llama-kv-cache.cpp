@@ -1683,6 +1683,15 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
 
     if (!v_trans) {
         if (pg_enabled) {
+#if defined(TURBO_DIAG_PAGE_ROWS)
+            {
+                static int s_call = 0;
+                if (s_call++ < 2) {
+                    fprintf(stderr, "[PAGE_WRITE] n_stream=%zu size=%zu n_seqs=%d\n",
+                            sinfo.n_stream(), sinfo.size(), (int) ubatch->n_seqs);
+                }
+            }
+#endif
             for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
                 const uint32_t strm = sinfo.strm[s];
                 for (uint32_t i = 0; i < sinfo.size(); ++i) {
@@ -1692,6 +1701,18 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
                     const int32_t  pblock   = pg_page_table[strm][lpage];
                     GGML_ASSERT(pblock >= 0 && "PagedAttention: page not allocated when writing V idx");
                     data[s*sinfo.size() + i] = (int64_t)pblock * pg_block_size + within;
+#if defined(TURBO_DIAG_PAGE_ROWS)
+                    {
+                        static int s_row_call = 0;
+                        if (s_row_call < 24) {
+                            const llama_seq_id sid = ubatch->seq_id[s * sinfo.size() + i][0];
+                            fprintf(stderr, "[PAGE_WRITE] s=%u i=%u seq_id=%d cell_idx=%u lpage=%u within=%u pblock=%d phys_row=%lld\n",
+                                    s, i, (int) sid, cell_idx, lpage, within, pblock,
+                                    (long long)((int64_t)pblock * pg_block_size + within));
+                            s_row_call++;
+                        }
+                    }
+#endif
                 }
             }
 #if defined(TURBO_DIAG_KQ)
