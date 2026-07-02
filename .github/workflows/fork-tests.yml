@@ -1,0 +1,57 @@
+name: Fork Tests
+
+# Lean CI for the mallana fork: build CPU-only and run the ctest suite on every
+# push/PR, independent of the heavy upstream build.yml matrix. GPU-dependent
+# behavior (CUDA/HIP paged attention, turbo kernels) cannot run on hosted
+# runners; this covers graph construction, quantization round-trips, tokenizers,
+# grammar, and the turbo CPU paths.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - 'feature/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: fork-tests-cpu
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' }}
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libssl-dev
+
+      - name: Build
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_TESTS=ON \
+            -DGGML_RPC=ON
+          time cmake --build build --config Release -j $(nproc)
+
+      - name: Test (ctest -L main)
+        run: |
+          cd build
+          ctest -L main --output-on-failure --timeout 900
+
+      - name: TurboQuant unit tests
+        run: |
+          ./build/bin/test-turbo-quant

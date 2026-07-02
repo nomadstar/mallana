@@ -2151,7 +2151,7 @@ ggml_tensor * llm_graph_context::build_attn(
         memcpy(&bs,      v_ptable->op_params,     sizeof(int32_t));
         memcpy(&ns_phys, v_ptable->op_params + 1, sizeof(int32_t));
 
-        if (cparams.flash_attn) {
+        if (cparams.flash_attn && kq_b == nullptr) {
             // Phase 2: native paged FA — pass pool + page table directly to the kernel.
             //
             // Pool layout: [n_embd_v, total_slots] where each column is one physical slot
@@ -2213,7 +2213,10 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
-    if (inp->self_v_page_table && cparams.flash_attn) {
+    // Only wire the page table into the FA node when the paged-FA path was actually
+    // built above. With kq_b != nullptr (e.g. T5 cross-attention bias) build_attn_mha
+    // falls back to standard MHA and no GGML_OP_FLASH_ATTN_EXT node exists.
+    if (inp->self_v_page_table && cparams.flash_attn && kq_b == nullptr) {
         ggml_tensor * fa_tensor = find_flash_attn_ext(cur);
         if (fa_tensor) {
             ggml_flash_attn_ext_set_page_table(fa_tensor, inp->self_v_page_table);
