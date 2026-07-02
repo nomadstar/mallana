@@ -2,6 +2,7 @@
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-model-loader.h"
+#include "llama-ext.h"
 
 #include <cmath>
 #include <cstring>
@@ -787,7 +788,7 @@ static bool tensor_requires_imatrix(const char * tensor_name, const ggml_type ds
 // given a file type, get the default tensor type
 //
 
-static ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
+ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
     switch (ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: return GGML_TYPE_Q4_0;
         case LLAMA_FTYPE_MOSTLY_Q4_1: return GGML_TYPE_Q4_1;
@@ -1304,4 +1305,96 @@ uint32_t llama_model_quantize(
     }
 
     return 0;
+}
+
+//
+// Helper functions for external tools exposed in llama-ext.h
+//
+
+quantize_state_impl * llama_quant_init(
+        const llama_model * model,
+        const llama_model_quantize_params * params) {
+    return new quantize_state_impl(*model, params);
+}
+
+void llama_quant_free(quantize_state_impl * qs) {
+    delete qs;
+}
+
+llama_model * llama_quant_model_from_metadata(const llama_quant_model_desc * desc) {
+    struct llama_model_params mparams = llama_model_default_params();
+    auto arch = llm_arch_from_string(desc->architecture);
+    auto * model = new llama_model(mparams);
+    model->arch = arch;
+
+    // infer llm_type: only LLM_TYPE_70B matters for quantization logic
+    if (model->arch == LLM_ARCH_LLAMA && desc->n_layer == 80 && desc->n_head != desc->n_head_kv) {
+        model->type = LLM_TYPE_70B;
+    }
+
+    model->hparams.n_embd             = desc->n_embd;
+    model->hparams.n_embd_head_k_full = desc->n_embd_head_k;
+    model->hparams.n_embd_head_v_full = desc->n_embd_head_v;
+    model->hparams.n_layer            = desc->n_layer;
+    model->hparams.n_expert           = desc->n_expert;
+
+    for (uint32_t i = 0; i < desc->n_layer; i++) {
+        model->hparams.n_head_arr[i]    = desc->n_head;
+        model->hparams.n_head_kv_arr[i] = desc->n_head_kv;
+        model->hparams.n_ff_arr[i]      = desc->n_ff;
+    }
+
+    return model;
+}
+
+bool llama_quant_tensor_allows_quantization(
+        const quantize_state_impl * qs,
+        const ggml_tensor * tensor) {
+    return tensor_allows_quantization(qs->params, qs->model.arch, tensor);
+}
+
+void llama_quant_compute_types(
+        quantize_state_impl * qs,
+        llama_ftype ftype,
+        ggml_tensor ** tensors,
+        ggml_type * result_types,
+        size_t n_tensors) {
+    // reset per-computation state
+    qs->n_attention_wv      = 0;
+    qs->n_ffn_down          = 0;
+    qs->n_ffn_gate          = 0;
+    qs->n_ffn_up            = 0;
+    qs->i_attention_wv      = 0;
+    qs->i_ffn_down          = 0;
+    qs->i_ffn_gate          = 0;
+    qs->i_ffn_up            = 0;
+    qs->n_fallback          = 0;
+    qs->has_imatrix         = false;
+    qs->has_tied_embeddings = true;
+
+    // build per-tensor metadata and initialize counters (mirrors the
+    // preliminary loop in llama_model_quantize_impl)
+    std::vector<tensor_metadata> metadata(n_tensors);
+    for (size_t i = 0; i < n_tensors; i++) {
+        const auto cat = tensor_get_category(ggml_get_name(tensors[i]));
+        if (category_is_attn_v(cat)) {
+            ++qs->n_attention_wv;
+        }
+        if (cat == tensor_category::OUTPUT) {
+            qs->has_tied_embeddings = false;
+        }
+        metadata[i].category = cat;
+    }
+    qs->n_ffn_down = qs->n_ffn_gate = qs->n_ffn_up = (int)qs->model.hparams.n_layer;
+
+    // use a local copy of params with the requested ftype
+    llama_model_quantize_params local_params = *qs->params;
+    local_params.ftype = ftype;
+
+    ggml_type default_type = llama_ftype_get_default_type(ftype);
+
+    // compute types
+    for (size_t i = 0; i < n_tensors; i++) {
+        result_types[i] = llama_tensor_get_type(*qs, &local_params, tensors[i], default_type, metadata[i]);
+    }
 }

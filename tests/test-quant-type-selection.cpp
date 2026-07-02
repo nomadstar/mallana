@@ -434,7 +434,7 @@ static int run_remote_tests(const std::string & snapshot_dir, const char * argv0
         std::string  name = model_name_from_repo(spec.repo);
         printf("=== %s ===\n", name.c_str());
 
-        auto result = gguf_fetch_model_meta(spec.repo, spec.quant, "", false);
+        auto result = gguf_fetch_model_meta(spec.repo, spec.quant);
         if (!result.has_value()) {
             printf("  SKIP  (could not fetch model metadata)\n\n");
             total_skip++;

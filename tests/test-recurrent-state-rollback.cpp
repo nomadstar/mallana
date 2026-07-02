@@ -1,3 +1,16 @@
+// test-recurrent-state-rollback.cpp
+//
+// Validates that recurrent/hybrid model state can be checkpointed before the
+// last prompt token and rolled back by restoring the checkpoint into another
+// context, reproducing identical logits on replay.
+//
+// Adapted from upstream llama.cpp: this fork does not implement the recurrent
+// snapshot-slot API (n_rs_seq / llama_n_rs_seq / common_prompt_checkpoint), so
+// the checkpoint/rollback is expressed with llama_state_get_data /
+// llama_state_set_data instead. Recurrent memories cannot remove tokens
+// (llama_memory_seq_rm on a partial range fails), which is exactly why a
+// state-restore rollback is the mechanism under test.
+
 #include "arg.h"
 #include "common.h"
 #include "llama.h"
@@ -11,9 +24,6 @@
 static llama_context * make_ctx(const common_params & params, llama_model * model) {
     auto cparams = common_context_params_to_llama(params);
     cparams.n_seq_max = 1;
-    cparams.n_rs_seq  = 8;
-    cparams.n_batch   = std::max(cparams.n_batch,  (uint32_t) (cparams.n_rs_seq + 1));
-    cparams.n_ubatch  = std::max(cparams.n_ubatch, (uint32_t) (cparams.n_rs_seq + 1));
     return llama_init_from_model(model, cparams);
 }
 
@@ -72,43 +82,37 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    if (llama_n_rs_seq(ctx_src) == 0) {
-        fprintf(stderr, "%s : skipping because n_rs_seq is disabled\n", __func__);
-        llama_free(ctx_src);
-        llama_free(ctx_dst);
-        return 0;
-    }
-
     std::vector<llama_token> tokens = common_tokenize(ctx_src, "The quick brown fox jumps", true);
-    const uint32_t n_rs_seq = llama_n_rs_seq(ctx_src);
-    if (tokens.size() > n_rs_seq + 1) {
-        tokens.resize(n_rs_seq + 1);
-    }
     if (tokens.size() < 2) {
         fprintf(stderr, "%s : not enough prompt tokens\n", __func__);
         return 1;
     }
     const uint32_t    n_tokens = tokens.size();
     const llama_token last_tok = tokens.back();
-    const llama_pos   last_pos = (llama_pos) n_tokens - 2;
+    const llama_pos   last_pos = (llama_pos) n_tokens - 1;
 
-    // Decode the full prompt on the source, then roll back the last position.
-    // Rollback leaves the recurrent memory in a snapshot state (rs_idx != 0).
-    if (!decode_tokens(ctx_src, tokens, n_tokens)) {
+    // Decode the prompt up to (but not including) the last token, then take a
+    // checkpoint of the recurrent state. Restoring this checkpoint later is the
+    // rollback: recurrent memories cannot rewind by removing tokens.
+    if (!decode_tokens(ctx_src, tokens, n_tokens - 1)) {
         fprintf(stderr, "%s : failed to decode prompt\n", __func__);
         return 1;
     }
-    if (!llama_memory_seq_rm(llama_get_memory(ctx_src), 0, last_pos, -1)) {
-        fprintf(stderr, "%s : rollback failed\n", __func__);
+
+    std::vector<uint8_t> ckpt(llama_state_get_size(ctx_src));
+    const size_t n_saved = llama_state_get_data(ctx_src, ckpt.data(), ckpt.size());
+    if (n_saved == 0 || n_saved > ckpt.size()) {
+        fprintf(stderr, "%s : checkpoint save failed\n", __func__);
         return 1;
     }
 
-    // Save the rolled-back state and restore it into a fresh context.
-    common_prompt_checkpoint ckpt;
-    ckpt.update_tgt(ctx_src, 0, 0);
-    ckpt.load_tgt(ctx_dst, 0, 0);
+    // Restore the checkpoint into a fresh context.
+    if (llama_state_set_data(ctx_dst, ckpt.data(), n_saved) == 0) {
+        fprintf(stderr, "%s : checkpoint restore failed\n", __func__);
+        return 1;
+    }
 
-    // Replay the rolled-back token on both contexts and compare logits.
+    // Replay the last token on both contexts and compare logits.
     if (!decode_one(ctx_src, last_tok, last_pos) ||
         !decode_one(ctx_dst, last_tok, last_pos)) {
         fprintf(stderr, "%s : replay failed\n", __func__);
@@ -131,9 +135,9 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Repeat the load into a context that already has its own rollback state:
-    // groups 1..n_rs_seq hold a *different* prompt's history, and rs_idx[0] is
-    // non-zero at load time. The restore must wipe that state and still match.
+    // Repeat the restore into a context that already has its own recurrent
+    // history from a *different* prompt. The restore must wipe that state and
+    // still reproduce the same logits.
     llama_context * ctx_dirty = make_ctx(params, model);
     if (ctx_dirty == nullptr) {
         fprintf(stderr, "%s : failed to init dirty ctx\n", __func__);
@@ -151,12 +155,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s : dirty prompt decode failed\n", __func__);
         return 1;
     }
-    if (!llama_memory_seq_rm(llama_get_memory(ctx_dirty), 0, last_pos, -1)) {
-        fprintf(stderr, "%s : dirty rollback failed\n", __func__);
+
+    if (llama_state_set_data(ctx_dirty, ckpt.data(), n_saved) == 0) {
+        fprintf(stderr, "%s : dirty checkpoint restore failed\n", __func__);
         return 1;
     }
-
-    ckpt.load_tgt(ctx_dirty, 0, 0);
 
     if (!decode_one(ctx_dirty, last_tok, last_pos)) {
         fprintf(stderr, "%s : dirty replay failed\n", __func__);
