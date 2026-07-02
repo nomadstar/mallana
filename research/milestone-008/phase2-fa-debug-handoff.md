@@ -1,15 +1,15 @@
 # Phase 2 FA Debug Handoff
 
-**Fecha:** 2026-06-30  
-**Estado:** Bloqueado — PPL=35125 con `-fa on` + paging activo  
+**Fecha:** 2026-06-30
+**Estado:** Bloqueado — PPL=35125 con `-fa on` + paging activo
 **Próximo responsable:** agy
 
 ---
 
 ## Resumen del problema
 
-Phase 2 paged FA produce PPL=35125 en lugar de ~9.7 (baseline).  
-Phase 1 (gather, `-fa off`) funciona correctamente: PPL=9.7094 ✓  
+Phase 2 paged FA produce PPL=35125 en lugar de ~9.7 (baseline).
+Phase 1 (gather, `-fa off`) funciona correctamente: PPL=9.7094 ✓
 El bug es específico del path CUDA de Flash Attention con page table.
 
 ---

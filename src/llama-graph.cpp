@@ -2066,6 +2066,24 @@ llm_graph_input_attn_kv * llm_graph_context::build_attn_inp_kv() const {
     return (llm_graph_input_attn_kv *) res->add_input(std::move(inp));
 }
 
+static ggml_tensor * find_flash_attn_ext(ggml_tensor * tensor, int depth = 0) {
+    if (!tensor || depth > 16) {
+        return nullptr;
+    }
+    if (tensor->op == GGML_OP_FLASH_ATTN_EXT) {
+        return tensor;
+    }
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
+        if (tensor->src[i]) {
+            ggml_tensor * found = find_flash_attn_ext(tensor->src[i], depth + 1);
+            if (found) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
 ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_kv * inp,
         ggml_tensor * wo,
@@ -2182,18 +2200,11 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
     if (inp->self_v_page_table && cparams.flash_attn) {
-        ggml_tensor * fa_tensor = cur;
-        while (fa_tensor && fa_tensor->op != GGML_OP_FLASH_ATTN_EXT) {
-            if (fa_tensor->op == GGML_OP_RESHAPE || fa_tensor->op == GGML_OP_VIEW || fa_tensor->op == GGML_OP_TRANSPOSE || fa_tensor->op == GGML_OP_TURBO_WHT) {
-                fa_tensor = fa_tensor->src[0];
-            } else {
-                break;
-            }
-        }
-        if (fa_tensor && fa_tensor->op == GGML_OP_FLASH_ATTN_EXT) {
+        ggml_tensor * fa_tensor = find_flash_attn_ext(cur);
+        if (fa_tensor) {
             ggml_flash_attn_ext_set_page_table(fa_tensor, inp->self_v_page_table);
         } else {
-            ggml_flash_attn_ext_set_page_table(cur, inp->self_v_page_table);
+            GGML_ABORT("Failed to locate GGML_OP_FLASH_ATTN_EXT tensor in attention output DAG");
         }
     }
     cb(cur, "kqv_out", il);

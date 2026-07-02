@@ -12,6 +12,7 @@ Roles:
 
 import argparse
 import os
+import re
 import sys
 import subprocess
 import shutil
@@ -37,6 +38,96 @@ VALIDATION_LOG = ".multiswarm_validation.log"
 HISTORY_LOG = ".multiswarm_history.log"
 
 HEARTBEAT_INTERVAL = 30  # seconds of silence before printing a status line
+BUILD_POLL_INTERVAL = 3  # seconds between /proc scans for live build/compile jobs
+
+# Process names that anchor a build tree (used to detect "the agent kicked off a
+# build" even after the agent's own CLI process has exited/crashed/timed out).
+BUILD_ROOT_NAMES = {"cmake", "make", "ninja"}
+# Actual compiler/linker workers whose cmdline names the source file being built.
+COMPILE_NAMES = {"cc1plus", "cc1", "nvcc", "ccache", "cicc", "ptxas",
+                  "ld", "ld.bfd", "ld.gold", "ld.lld"}
+_SRC_FILE_RE = re.compile(r'([\w./+-]+\.(?:cu|cpp|cc|cxx|c))(?:\s|$)')
+
+
+def _read_ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        stat = f.read()
+    # format: pid (comm) state ppid ...  -- comm may contain spaces/parens,
+    # so split from the last ')' rather than by naive whitespace splitting.
+    rest = stat[stat.rfind(')') + 2:].split()
+    return int(rest[1])
+
+
+def _read_comm(pid):
+    with open(f"/proc/{pid}/comm") as f:
+        return f.read().strip()
+
+
+def _read_cmdline(pid):
+    with open(f"/proc/{pid}/cmdline", "rb") as f:
+        raw = f.read()
+    return raw.replace(b"\x00", b" ").decode(errors="replace").strip()
+
+
+def _children_map():
+    m = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            ppid = _read_ppid(pid)
+        except (IOError, OSError, IndexError, ValueError):
+            continue
+        m.setdefault(ppid, []).append(pid)
+    return m
+
+
+def _descendants(root_pid, cmap=None):
+    cmap = cmap if cmap is not None else _children_map()
+    seen = set()
+    frontier = [root_pid]
+    while frontier:
+        p = frontier.pop()
+        for c in cmap.get(p, []):
+            if c not in seen:
+                seen.add(c)
+                frontier.append(c)
+    return seen
+
+
+def _pid_alive(pid):
+    return os.path.exists(f"/proc/{pid}")
+
+
+def _scan_build_state(root_pid):
+    """Inspect the live process tree rooted at root_pid for build activity.
+
+    Reads directly from /proc, so it reflects reality even if the agent whose
+    subprocess this is has already exited, crashed, or silently stopped
+    narrating (e.g. it timed out waiting on its own `cmake --build` call).
+    Returns (build_root_pids, active_source_files).
+    """
+    descendants = _descendants(root_pid)
+    build_roots = set()
+    active_files = set()
+    for pid in descendants:
+        try:
+            comm = _read_comm(pid)
+        except (IOError, OSError):
+            continue
+        if comm in BUILD_ROOT_NAMES:
+            build_roots.add(pid)
+        if comm in COMPILE_NAMES:
+            try:
+                cmdline = _read_cmdline(pid)
+            except (IOError, OSError):
+                continue
+            matches = _SRC_FILE_RE.findall(cmdline)
+            if matches:
+                active_files.add(os.path.basename(matches[-1]))
+    return build_roots, active_files
+
 
 def check_cli_tool(name):
     """Check if a CLI tool is available in the system PATH."""
@@ -83,12 +174,35 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
     start = time.monotonic()
     last_output = [start]
     stop_event = threading.Event()
+    detected_build_roots = set()
+    last_active_files = set()
 
     def heartbeat():
         while not stop_event.is_set():
-            stop_event.wait(timeout=5)
-            if stop_event.is_set():
+            if stop_event.wait(timeout=BUILD_POLL_INTERVAL):
                 break
+            # Read the real process tree from /proc — this is independent of
+            # whatever the agent itself chooses to narrate on stdout, so it
+            # still shows real compiler activity even if the agent goes quiet
+            # (or crashes) while a build it launched keeps running.
+            try:
+                roots, files = _scan_build_state(process.pid)
+            except Exception:
+                roots, files = set(), set()
+            detected_build_roots.update(roots)
+
+            if files != last_active_files:
+                last_active_files.clear()
+                last_active_files.update(files)
+                if files:
+                    shown = ", ".join(sorted(files)[:4])
+                    more = "" if len(files) <= 4 else f" (+{len(files) - 4} more)"
+                    print_func(
+                        f"{prefix_str}{CYAN}[build] {len(files)} job(s) compiling: "
+                        f"{shown}{more}{RESET}",
+                        flush=True,
+                    )
+
             silence = time.monotonic() - last_output[0]
             if silence >= HEARTBEAT_INTERVAL:
                 elapsed = time.monotonic() - start
@@ -112,6 +226,37 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
     stop_event.set()
     hb.join()
     process.wait()
+
+    # The agent process may exit (finish, crash, or time out internally) while
+    # a build it launched is still compiling in the background — this happened
+    # with agy timing out on its own `cmake --build` call. Don't let the swarm
+    # move on to the next phase (or misreport the outcome) while that build is
+    # still running: wait here until every detected build root actually exits.
+    for root_pid in sorted(detected_build_roots):
+        if not _pid_alive(root_pid):
+            continue
+        print_func(
+            f"{prefix_str}{YELLOW}⏸ agent process exited but build (pid {root_pid}) "
+            f"is still running — pausing before continuing...{RESET}",
+            flush=True,
+        )
+        waited = 0
+        while _pid_alive(root_pid):
+            time.sleep(BUILD_POLL_INTERVAL)
+            waited += BUILD_POLL_INTERVAL
+            if waited % HEARTBEAT_INTERVAL == 0:
+                _, files = _scan_build_state(root_pid)
+                if files:
+                    shown = ", ".join(sorted(files)[:4])
+                    print_func(
+                        f"{prefix_str}{CYAN}[build] still running ({waited}s): "
+                        f"{shown}{RESET}",
+                        flush=True,
+                    )
+        print_func(
+            f"{prefix_str}{GREEN}[build] background build (pid {root_pid}) finished.{RESET}",
+            flush=True,
+        )
 
     elapsed = time.monotonic() - start
     rc_color = GREEN if process.returncode == 0 else RED
