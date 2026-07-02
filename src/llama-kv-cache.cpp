@@ -1503,6 +1503,26 @@ void llama_kv_cache::set_input_v_page_table(ggml_tensor * dst, uint32_t n_kv, co
         s_first = !s_first;
     }
 #endif
+#if defined(TURBO_DIAG_V_READS)
+    // Round 4: dump the exact row->stream mapping used when the page table was
+    // built, so it can be diffed against what the FA kernel ("sequence") and
+    // gather kernel ("s") actually resolve for row indices 1,2,3 (only row 0
+    // was verified in prior rounds via TURBO_DIAG_PAGE_ROWS).
+    {
+        static int s_vpt_call = 0;
+        if (s_vpt_call++ < 2) {
+            fprintf(stderr, "[V_PT_WRITE] n_rows=%u n_lpage=%u ns=%u s0=%u\n", n_rows, n_lpage, ns, sinfo.s0);
+            for (uint32_t r = 0; r < n_rows; ++r) {
+                const uint32_t strm = sinfo.s0 + std::min(r, ns - 1);
+                fprintf(stderr, "  row %u (strm=%u): ", r, strm);
+                for (uint32_t lp = 0; lp < n_lpage && lp < 8; ++lp) {
+                    fprintf(stderr, "%d ", tmp[r * n_lpage + lp]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+    }
+#endif
     ggml_backend_tensor_set(dst, tmp.data(), 0, nelems * sizeof(int32_t));
     (void) n_kv;
     (void) n_seq;

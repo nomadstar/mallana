@@ -459,6 +459,24 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
 
+    // PagedAttention: only the VEC (fattn-vec.cuh) and TILE (fattn-tile.cuh) kernels
+    // implement page-table V addressing (v_paged_ptr). The tensor-core kernels
+    // (MMA_F16 in fattn-mma-f16.cuh, WMMA_F16 in fattn-wmma-f16.cuh) take v_ptable as
+    // a parameter but never use it (GGML_UNUSED(v_ptable) in fattn-mma-f16.cuh) and
+    // fall back to unpaged direct addressing (V + nb23*sequence + ...) against a pool
+    // tensor that has no valid per-sequence stride when paged -- silently reading the
+    // wrong physical rows (including the dummy sentinel block) instead of failing
+    // loudly. This was the root cause of the Phase 2 paged-FA PPL corruption
+    // (PPL ~35000-38000 instead of ~9.7-12.3); see
+    // research/milestone-008/phase2-fa-debug-handoff.md round 4. Route around it by
+    // forcing a paging-aware kernel whenever a page table is attached (dst->src[5]).
+    if (dst->src[5] != nullptr) {
+        if (can_use_vector_kernel) {
+            return BEST_FATTN_KERNEL_VEC;
+        }
+        return BEST_FATTN_KERNEL_TILE;
+    }
+
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
         if (can_use_vector_kernel) {

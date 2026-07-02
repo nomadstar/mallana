@@ -26,6 +26,21 @@ static __global__ void paged_gather_v_kernel(
     const char * src = pool + src_row  * row_bytes;
     char       * dst = out  + (int64_t)blockIdx.x * row_bytes;
 
+#if defined(TURBO_DIAG_V_READS)
+    // Round 4: dump raw V bytes actually read by the gather (-fa off) path for
+    // sequence rows s>=1, r=0 (k_abs=0), so they can be diffed byte-for-byte
+    // against the paged FA (-fa on) kernel's [V_READ_FA] dump at the same
+    // logical coordinates. Prior rounds only verified this for s=0/page 0.
+    if (r == 0 && s >= 1 && s <= 3 && threadIdx.x == 0) {
+        uint8_t raw_bytes[8];
+        for (int b = 0; b < 8 && b < row_bytes; ++b) raw_bytes[b] = (uint8_t) src[b];
+        printf("[V_READ_GATHER] seq=%d k_abs=0 lpage=%d pblock=%d src_row=%lld raw_bytes=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+               s, lpage, pblock, (long long) src_row,
+               raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3],
+               raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]);
+    }
+#endif
+
     // Fast 4-byte aligned copies for the bulk of the row.
     const int64_t n_full = row_bytes & ~(int64_t)3;
     for (int64_t i = (int64_t)threadIdx.x * 4; i < n_full; i += (int64_t)blockDim.x * 4) {

@@ -420,14 +420,24 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                     (size_t)src1->nb[0], (size_t)src1->nb[1], (size_t)src1->nb[2], (size_t)src1->nb[3],
                     ggml_type_name(src1->type));
 
-            const int test_coords[4][3] = {
-                {0, 0, 0},
-                {0, 16, 16},
-                {1, 16, 16},
-                {1, 32, 32},
+            // Round 4: sample both a masked (key > query, expect -inf) and a
+            // non-trivial allowed off-diagonal (key < query, expect 0) position
+            // per sequence, for all 4 sequences (n_stream=4 at --chunks 10).
+            // Round 3 only sampled causal-diagonal (key == query) coordinates,
+            // which are always "allowed" (val=0) and can't reveal a row/sequence
+            // desync hiding behind matching zeros.
+            const int test_coords[8][3] = {
+                {0, 16, 32}, // s=0, query=16, key=32 (masked, expect -inf)
+                {0, 32, 16}, // s=0, query=32, key=16 (allowed, expect 0)
+                {1, 16, 32}, // s=1, query=16, key=32 (masked, expect -inf)
+                {1, 32, 16}, // s=1, query=32, key=16 (allowed, expect 0)
+                {2, 16, 32}, // s=2, query=16, key=32 (masked, expect -inf)
+                {2, 32, 16}, // s=2, query=32, key=16 (allowed, expect 0)
+                {3, 16, 32}, // s=3, query=16, key=32 (masked, expect -inf)
+                {3, 32, 16}, // s=3, query=32, key=16 (allowed, expect 0)
             };
 
-            for (int tc = 0; tc < 4; ++tc) {
+            for (int tc = 0; tc < 8; ++tc) {
                 const int s   = test_coords[tc][0];
                 const int j   = test_coords[tc][1];
                 const int ic0 = test_coords[tc][2];

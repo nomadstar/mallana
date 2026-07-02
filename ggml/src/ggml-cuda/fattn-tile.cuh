@@ -454,7 +454,8 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
         const int32_t             sequence,
         const int32_t             v_ptable_ne0,
         const int32_t             v_block_size,
-        const int                 k_VKQ_0_plus_k0) {
+        const int                 k_VKQ_0_plus_k0,
+        const int                 k_max) {
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
@@ -490,7 +491,8 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
                         sequence,
                         v_ptable_ne0,
                         v_block_size,
-                        k_VKQ_0_plus_k0 + i);
+                        k_VKQ_0_plus_k0 + i,
+                        k_max);
                     ggml_cuda_memcpy_1<cpy_nb>(
                         tile_KV + i*(J/2 + J_padding) + j,
                         !oob_check || i < i_sup ? src_ptr + j : zero);
@@ -513,7 +515,8 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
         const int32_t             sequence,
         const int32_t             v_ptable_ne0,
         const int32_t             v_block_size,
-        const int                 k_VKQ_0_plus_k0) {
+        const int                 k_VKQ_0_plus_k0,
+        const int                 k_max) {
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
@@ -550,7 +553,8 @@ static __device__ __forceinline__ void flash_attn_tile_load_tile_paged(
                         sequence,
                         v_ptable_ne0,
                         v_block_size,
-                        k_VKQ_0_plus_k0 + i);
+                        k_VKQ_0_plus_k0 + i,
+                        k_max);
                     ggml_cuda_memcpy_1<sizeof(tmp_h2)>(
                         tmp_h2, !oob_check || i < i_sup ? src_ptr + j : zero);
 
@@ -813,7 +817,7 @@ static __device__ __forceinline__ void flash_attn_tile_iter(
 #pragma unroll
     for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
         flash_attn_tile_load_tile_paged<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
-            (V_h2, KV_tmp, stride_V2, k_VKQ_sup - k0, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k0);
+            (V_h2, KV_tmp, stride_V2, k_VKQ_sup - k0, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k0, k_VKQ_max);
         __syncthreads();
 
 #ifdef FAST_FP16_AVAILABLE

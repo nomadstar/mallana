@@ -128,6 +128,32 @@ static __global__ void flash_attn_ext_vec(
     V += (v_ptable ? (int64_t)0 : nb23*sequence) + nb22*(head / gqa_ratio);
     const char * V_paged_base = V; // absolute base for paged access (head already applied)
 
+#if defined(TURBO_DIAG_V_READS)
+    // Round 4: dump the resolved physical block + raw V bytes actually read by
+    // the FA kernel for sequence>=1, head=0, k_abs=0, so they can be diffed
+    // byte-for-byte at identical logical coordinates against a second run.
+    // NOTE: comparing against -fa off is NOT valid here -- v_trans=!cparams.flash_attn
+    // at KV-cache construction (llama-model.cpp) means -fa off forces pg_enabled=false
+    // (llama-kv-cache.cpp:380), so self_v_page_table is never built and this whole
+    // paged/gather code path (including ggml_gather_paged_v / paged-gather.cu) is
+    // never even reached with -fa off -- confirmed empirically this round (see
+    // handoff doc). The valid same-kernel A/B comparison is `-fa on` with paging
+    // (v_ptable != nullptr) vs `LLAMA_NO_PAGING=1 -fa on` (v_ptable == nullptr,
+    // same fattn-vec.cuh kernel, same v_paged_ptr call, just the non-paged branch).
+    if (blockIdx.x == 0 && blockIdx.y == 0 && head == 0 && sequence >= 1 && sequence <= 3 &&
+        threadIdx.x == 0 && threadIdx.y == 0) {
+        const int k_abs = 0;
+        const char * vptr = v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_abs, ne11);
+        const int32_t pblock = v_ptable ? v_ptable[sequence * v_ptable_ne0 + (k_abs / v_block_size)] : -1;
+        uint8_t raw_bytes[8];
+        for (int b = 0; b < 8; ++b) raw_bytes[b] = (uint8_t) vptr[b];
+        printf("[V_READ_FA] seq=%d head=%d k_abs=%d lpage=%d pblock=%d paged=%d raw_bytes=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+               sequence, head, k_abs, v_ptable ? (k_abs / v_block_size) : -1, pblock, v_ptable != nullptr,
+               raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3],
+               raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]);
+    }
+#endif
+
     const half * maskh  = (const half  *) (mask + nb33*(sequence % ne33) + nb31*ic0);
 
     const float slope = get_alibi_slope(max_bias, head, n_head_log2, m0, m1);
@@ -456,14 +482,14 @@ static __global__ void flash_attn_ext_vec(
                 half2 tmp[V_rows_per_thread/2];
                 if constexpr (type_V == GGML_TYPE_BF16) {
                     float2 tmp_f[V_rows_per_thread/2];
-                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp_f,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max), tmp_f,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
                         tmp[i_VKQ_1] = __float22half2_rn(tmp_f[i_VKQ_1]);
                     }
                 } else {
-                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max), tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
                 }
 #pragma unroll
@@ -500,7 +526,7 @@ static __global__ void flash_attn_ext_vec(
             // per-element norm multiply.  centroid[idx]*norm is computed 8/4/16 times
             // (once per centroid) instead of D times (once per element).
             if constexpr (type_V == GGML_TYPE_TURBO3_0) {
-                const block_turbo3_0 * vb = (const block_turbo3_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
+                const block_turbo3_0 * vb = (const block_turbo3_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
                 int prev_ib = -1;
                 float sc[8];
 
@@ -535,7 +561,7 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
             } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
-                const block_turbo2_0 * vb = (const block_turbo2_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
+                const block_turbo2_0 * vb = (const block_turbo2_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
                 int prev_ib = -1;
                 float sc[4];
 
@@ -568,7 +594,7 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
             } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
-                const block_turbo4_0 * vb = (const block_turbo4_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k);
+                const block_turbo4_0 * vb = (const block_turbo4_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
                 int prev_ib = -1;
                 float sc[16];
 
@@ -605,7 +631,7 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
                 for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                     float2 tmp[V_rows_per_thread/2];
-                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k), tmp,
+                    dequantize_V(v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max), tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {

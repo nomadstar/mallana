@@ -712,3 +712,321 @@ ronda — instrumentar `TURBO_DIAG_PAGE_ROWS` para imprimir `seq` explícito y
 comparar valores de V leídos por el kernel FA paginado, byte a byte, contra
 los del path gather (`-fa off`) para las mismas coordenadas `(seq, lpage,
 head, dim)`.
+
+---
+
+## Update — 2026-07-02 (ronda 4): root cause del kernel-dispatch encontrado y verificado; nuevo bug de memoria expuesto (NO resuelto todavía)
+
+**Estado:** Root cause de la corrupción de PPL **identificado y verificado
+matemáticamente** (no sólo por lectura estática): el kernel FA paginado (VEC,
+`fattn-vec.cuh`) **nunca se estaba ejecutando** para este workload — el
+dispatcher elegía el kernel MMA_F16 (`fattn-mma-f16.cuh`), que ignora
+por completo la page table. Se aplicó un fix de ruteo (`fattn.cu`) que
+fuerza el kernel correcto, y **se validó que corrige el PPL** bajo
+`CUDA_LAUNCH_BLOCKING=1` (PPL=12.2909, prácticamente idéntico al baseline).
+Pero el mismo cambio expone un **segundo bug, independiente y aún sin
+arreglar**: un acceso de memoria fuera de rango real (confirmado con
+`compute-sanitizer`) dentro de `flash_attn_ext_vec` cuando se combina con
+paginación, que crashea el proceso en ejecución normal (sin
+`CUDA_LAUNCH_BLOCKING=1`). **El bug de PPL no puede darse por resuelto
+todavía** — ver criterios de aceptación al final de esta entrada.
+
+### Parte 1: se corrigió el experimento de coordenadas de mask (tarea 1 del plan)
+
+Se reemplazaron los `test_coords` causal-diagonales (ronda 3, siempre
+`val=0`, insuficientes según la crítica) por 8 coordenadas — una posición
+enmascarada (`key > query`, se espera `-inf`) y una posición permitida no
+trivial (`key < query`, se espera `0`) por cada una de las 4 secuencias —
+en `ggml/src/ggml-cuda/softmax.cu` y `ggml/src/ggml-cuda/fattn-common.cuh`
+(mismas coordenadas en ambos, para diff 1:1). Corrida con
+`-c 512 --chunks 10 -ngl 99 --triattention-page-budget 16` (chunks=10 tal
+como exige la crítica, no chunks=5):
+
+```
+-fa off (gather... ver Parte 2, en realidad NO es el path paginado):
+  (s=0..3, j=16, ic0=32): val=-inf  (masked, correcto)
+  (s=0..3, j=32, ic0=16): val=0     (allowed, correcto)
+Final estimate: PPL = 12.2763
+```
+
+Todas las 8 coordenadas, para las 4 secuencias, dieron el valor lógico
+esperado. **El lead de "stride/indexado de la mask" queda descartado de
+forma aún más concluyente que en la ronda 3** — pero ver Parte 2: esta
+comparación en particular resultó ser menos informativa de lo que se
+pensaba, porque el lado "-fa off" nunca ejerce el código de paginación.
+
+### Parte 2: hallazgo estructural — "-fa off" (Phase 1 "gather") nunca ejecutó el código de paging, en NINGUNA ronda anterior
+
+Al instrumentar la escritura de la page table (`TURBO_DIAG_V_READS` en
+`llama_kv_cache::set_input_v_page_table`, `src/llama-kv-cache.cpp`) para
+verificar filas 1-3 (pendiente de rondas anteriores), el diagnóstico
+**nunca se disparó en la corrida `-fa off`** — la función ni siquiera se
+llamó. Investigando la causa (lectura del código, no instrumentación):
+
+```
+llama-model.cpp:8201,8219:  attn_v_trans = !cparams.flash_attn
+llama-kv-cache.cpp:380:     pg_enabled  = !v_trans && !getenv("LLAMA_NO_PAGING")
+llama-kv-cache.cpp:2834:    is_paged()  = pg_enabled
+llama-graph.cpp:2061-2063:  self_v_page_table sólo se construye si is_paged()
+```
+
+`cparams.flash_attn` es el mismo objeto/valor fijado por el flag `-fa` de
+línea de comandos para **todo el proceso** (se fija una vez al construir el
+KV-cache y no cambia durante la corrida salvo por un hook de auto-disable
+no relevante aquí). Con `-fa off`: `v_trans=true` ⟹ `pg_enabled=false`
+⟹ `is_paged()=false` ⟹ `self_v_page_table` nunca se construye ⟹
+`build_attn` toma la rama `v = mctx_cur->get_v(ctx0, il)` (línea 2198-2199,
+completamente ajena al pool/page-table) — el kernel gather
+(`ggml_gather_paged_v`, `ggml/src/ggml-cuda/paged-gather.cu`) **jamás se
+invoca**.
+
+**Consecuencia:** todas las comparaciones "`-fa on` (roto) vs `-fa off`
+(bueno)" hechas en las rondas 1-3 de este handoff — incluida la
+verificación de mask de esta misma ronda arriba — comparaban el path
+roto contra un path **completamente distinto y ajeno al bug** (atención
+clásica no paginada), no contra el path de paginación real. Esto no
+invalida las conclusiones puntuales (la mask, en efecto, no depende de
+`v_trans`/paginación, así que esa comparación seguía siendo válida por
+casualidad), pero explica por qué 3 rondas de comparación cuidadosa
+"-fa on vs -fa off" nunca acorralaron el bug: **nunca estaban comparando
+dos ejecuciones del mismo código**.
+
+Además, esto implica que `ggml_gather_paged_v` / `paged-gather.cu` (el
+fallback "Phase 1" en `src/llama-graph.cpp:2184-2197`, rama
+`else` de `if (cparams.flash_attn)`) es **código muerto bajo el wiring
+actual**: `is_paged()`/`pg_enabled` sólo es `true` si `cparams.flash_attn`
+era `true` al construir el KV-cache, y esa misma variable es la que decide,
+dentro de `build_attn`, si se toma la rama Phase 2 (nativa) o la rama
+`else` Phase 1 (gather) — ambas lecturas del mismo valor, nunca
+discrepan. La rama Phase 1 nunca se alcanza con ninguna combinación de
+flags de CLI actual. (Se dejó instrumentado con `TURBO_DIAG_V_READS` de
+todos modos, gateado y sin efecto, para si en el futuro se rehabilita esa
+rama.)
+
+La comparación válida — mismo kernel, mismo `cparams.flash_attn=true`,
+única diferencia es paginación sí/no — es `-fa on` con
+`--triattention-page-budget` vs `LLAMA_NO_PAGING=1 -fa on`. Ambas usan
+`v_trans=false` y (si hay page table) el mismo kernel FA; la única
+diferencia es `v_ptable == nullptr` vs no. Se usó esta comparación en la
+Parte 3.
+
+### Parte 3: root cause encontrado — el dispatcher de kernels FA ignora la page table para este workload
+
+Se instrumentó `fattn-vec.cuh` (`TURBO_DIAG_V_READS`, dump de bytes V
+crudos leídos vía `v_paged_ptr` en `seq=1,2,3, k_abs=0`) esperando ver
+output en la corrida `-fa on` paginada — **no apareció ningún
+`[V_READ_FA]`**, pese a que el string sí está en el binario
+(`strings libggml-cuda.so | grep V_READ_FA` lo confirma). Se investigó por
+qué el kernel `flash_attn_ext_vec` (`fattn-vec.cuh`) no se ejecuta:
+
+`ggml_cuda_flash_attn_ext` (`ggml/src/ggml-cuda/fattn.cu:571`) llama a
+`ggml_cuda_get_best_fattn_kernel`, que — para esta GPU (RTX 2050, cc=8.6,
+`turing_mma_available(cc)=true`) y este workload (`Q->ne[1]=128`, batch de
+prefill, no decode de un token) — cae en la rama de
+`turing_mma_available` (línea 463) y, como `Q->ne[1] != 1` y no cumple
+ninguna de las condiciones de `can_use_vector_kernel` con `Q->ne[1]<=2`,
+**retorna `BEST_FATTN_KERNEL_MMA_F16`** (línea 491), nunca `VEC`.
+
+Se verificó `ggml/src/ggml-cuda/fattn-mma-f16.cuh` (el kernel MMA
+realmente ejecutado): recibe `v_ptable` como parámetro pero lo descarta
+explícitamente —
+
+```cpp
+// fattn-mma-f16.cuh:1886-1887
+GGML_UNUSED(v_ptable);
+GGML_UNUSED(v_ptable_ne0);
+```
+
+— y direcciona V de forma **no paginada**, incondicionalmente:
+
+```cpp
+// fattn-mma-f16.cuh:1970, 2016
+const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
+```
+
+Esto es exactamente el síntoma descrito como "hipótesis original" al
+principio de este handoff (2026-06-30): un kernel que lee V sin traducir
+por la page table, aplicando `nb23*sequence` sobre un pool que — cuando
+está paginado — no tiene stride por secuencia válido (ver el comentario en
+`fattn-vec.cuh:127`: *"the pool has no per-sequence stride"*), leyendo
+bytes de la posición física equivocada (probablemente el bloque sentinela
+cero, u otra secuencia) para casi todo `K->ne[1]=256` × 4 secuencias ×
+28 capas → acumulación de error catastrófica → PPL≈35000-38000.
+`fattn-tile.cuh` (el otro kernel candidato) **sí** implementa
+`v_paged_ptr` correctamente (confirmado leyendo el código: líneas 486,
+546, 816, 931, 1057 etc.); `fattn-wmma-f16.cuh` no menciona `v_ptable` en
+absoluto (tampoco soportado).
+
+### Fix aplicado: forzar un kernel compatible con paginación cuando hay page table
+
+`ggml/src/ggml-cuda/fattn.cu`, dentro de `ggml_cuda_get_best_fattn_kernel`,
+justo después de calcular `can_use_vector_kernel` y antes de cualquier
+rama de tensor-cores:
+
+```cpp
+if (dst->src[5] != nullptr) {   // page table adjunta (ggml_flash_attn_ext_set_page_table)
+    if (can_use_vector_kernel) {
+        return BEST_FATTN_KERNEL_VEC;
+    }
+    return BEST_FATTN_KERNEL_TILE;
+}
+```
+
+(`dst->src[5]` es exactamente el slot que usa
+`ggml_flash_attn_ext_set_page_table`, ver `ggml/src/ggml.c:5402-5409`.)
+Para este modelo/config, `can_use_vector_kernel` es `true`
+(`Q->ne[0]=128<=256`, `128%64==0`, `K->ne[1]=256 % FATTN_KQ_STRIDE(256)==0`),
+así que se selecciona `BEST_FATTN_KERNEL_VEC` (`fattn-vec.cuh`), que sí
+implementa `v_paged_ptr`.
+
+### Validación: PPL correcto bajo `CUDA_LAUNCH_BLOCKING=1`
+
+Build limpio (sin macros `TURBO_DIAG_*`, `CMAKE_CUDA_FLAGS`/`CMAKE_CXX_FLAGS`
+vacíos, `GGML_CUDA_GRAPHS=ON` por defecto — se probó también con
+`GGML_CUDA_GRAPHS=OFF`, ver más abajo, mismo resultado):
+
+```
+CUDA_LAUNCH_BLOCKING=1, -fa on, paged, --chunks 10, --triattention-page-budget 16:
+  PPL = 12.2909 +/- 0.67798
+  per-chunk: 6.8668, 9.4321, 9.1124, 9.5137, 9.7254, 10.1348, 10.4772, 11.2055, 11.7714, 12.2909
+
+Comparar contra baseline (misma corrida, misma ronda):
+  LLAMA_NO_PAGING=1 -fa on, --chunks 10:  PPL = 12.2762
+  -fa off (legacy, no paginado, ver Parte 2), --chunks 10: PPL = 12.2763
+```
+
+**12.2909 vs 12.2762/12.2763 — dentro del rango esperado (~9.7-12.3), a
+menos de 0.15 de diferencia relativa.** Esto confirma que, una vez que el
+kernel correcto (VEC) realmente ejecuta la lógica de `v_paged_ptr`,
+`nb21`/`nb22`, `gqa_ratio` y el cast de mask a F16 — toda esa lógica
+matemática, revisada y re-revisada en las rondas 1-3, **era correcta**. El
+bug nunca estuvo en el direccionamiento paginado en sí; estuvo en que ese
+código de direccionamiento correcto nunca se ejecutaba.
+
+Diagnóstico adicional (`TURBO_DIAG_V_READS` en una build de instrumentación
+aparte) confirmó, para `seq=1,2,3`, que `[V_READ_FA]` resuelve
+`pblock=5,9,13` para `lpage=0` — coincide exactamente con lo que
+`[V_PT_WRITE]` había escrito (`row 1 (strm=1): 5 6 7 8...`, `row 2
+(strm=2): 9 10 11 12...`, `row 3 (strm=3): 13 14 15 16...`), cerrando
+definitivamente la verificación de filas 1-3 del page table que quedaba
+pendiente desde la ronda 3 (antes sólo se había verificado la fila/página
+0).
+
+### PERO: el mismo fix crashea en ejecución normal (sin `CUDA_LAUNCH_BLOCKING=1`) — bug nuevo, sin resolver
+
+Sin `CUDA_LAUNCH_BLOCKING=1` (el modo de ejecución normal/por defecto), la
+misma build crashea **de forma 100% reproducible** (probado 3+ veces,
+`--chunks 2` y `--chunks 10`, con y sin `--no-warmup`, con
+`GGML_CUDA_GRAPHS=ON` y `=OFF`):
+
+```
+/home/ignatus/GitHub/mallana/ggml/src/ggml-cuda/ggml-cuda.cu:100: CUDA error
+CUDA error: an internal operation failed
+  current device: 0, in function ggml_cuda_op_mul_mat_cublas at .../ggml-cuda.cu:1334
+  cublasSetStream_v2(ctx.cublas_handle(id), stream)
+```
+
+Este error en `cublasSetStream` es un **síntoma downstream** (el contexto
+CUDA queda corrupto por un error asíncrono anterior no capturado hasta la
+siguiente llamada a la API). Se usó `compute-sanitizer --tool memcheck`
+para encontrar el error real, y confirma un acceso de memoria
+genuinamente fuera de rango, no un falso positivo:
+
+```
+========= Invalid __global__ read of size 16 bytes
+=========     at void flash_attn_ext_vec<(int)128, (int)2, (ggml_type)1, (ggml_type)1, (bool)0>(...)+0x63b0
+=========     by thread (0,3,0) in block (1,0,0)
+=========     Access to 0x8f76b8700000 is out of bounds
+=========     and is 17.324.374.491.137 bytes after the nearest allocation ...
+```
+
+Un offset de ~17 billones de bytes más allá de la asignación válida no es
+un simple off-by-one — sugiere un puntero o índice completamente
+corrupto/no inicializado dentro del kernel (por ejemplo, un `pblock`
+basura si algo lee la page table fuera de sus límites, o una dirección
+mal calculada en otra parte del kernel VEC), no una desalineación menor
+del cálculo de `v_paged_ptr` ya validado matemáticamente arriba. Se
+descartaron dos hipótesis simples con evidencia:
+- **No es específico de CUDA graphs**: se recompiló con
+  `-DGGML_CUDA_GRAPHS=OFF` (deshabilita `GGML_CUDA_USE_GRAPHS` a nivel de
+  compilación) y el crash persiste idéntico.
+- **No es específico del warmup**: se corrió con `--no-warmup` y el crash
+  persiste idéntico (ocurre igual en el primer chunk real).
+
+No se identificó la causa exacta de este segundo bug en el tiempo
+disponible de esta ronda — requiere profiling adicional con
+`compute-sanitizer --tool memcheck --show-backtrace=host` correlacionado
+con líneas fuente (compilar con `-lineinfo`) dentro de
+`flash_attn_ext_vec` (revisar en particular `dequantize_V`/`vec_dot_KQ`
+para la combinatoria `D=128, ncols=2, K=V=F16`, y el puntero de mask
+`maskh` para `ncols=2` — el diagnóstico de mask de la Parte 1 sólo
+verificó offsets con `j` fijo por coordenada, no el acceso real que hace
+el kernel iterando `ic0+0..ncols-1` en paralelo).
+
+### Conclusión de esta ronda
+
+**Root cause del bug original de PPL: conclusivamente identificado y
+verificado matemáticamente** — el dispatcher de kernels FA
+(`ggml_cuda_get_best_fattn_kernel`, `fattn.cu`) selecciona el kernel
+MMA_F16 para este workload de prefill batched, y ese kernel ignora la
+page table por completo, leyendo V sin traducir. El fix de ruteo
+(forzar VEC/TILE cuando hay page table) corrige el PPL matemáticamente
+(validado bajo `CUDA_LAUNCH_BLOCKING=1`: 12.29 vs baseline 12.28), pero
+**expone un segundo bug, real y reproducible, de acceso a memoria fuera
+de rango dentro de `flash_attn_ext_vec` bajo paginación**, que no existía
+como problema observable antes porque ese kernel nunca se ejecutaba con
+`v_ptable` activo en este workload. **El bug de PPL NO puede darse por
+resuelto todavía** — no se cumple el criterio de aceptación del plan
+("validar que el PPL baja al rango baseline... antes de reclamar que está
+arreglado") bajo ejecución normal, sólo bajo `CUDA_LAUNCH_BLOCKING=1`, que
+no es representativo de uso real.
+
+### Estado del árbol de trabajo al cerrar esta ronda
+
+- `ggml/src/ggml-cuda/fattn.cu`: **fix real** — fuerza `BEST_FATTN_KERNEL_VEC`
+  o `_TILE` cuando `dst->src[5]` (page table) está presente. Necesario pero
+  no suficiente (ver bug nuevo arriba). Recomendado dejarlo — no regresiona
+  ningún caso sin paginación (sólo cambia el ruteo cuando `v_ptable` ya
+  estaba adjunta, que antes producía PPL basura de todos modos).
+- `ggml/src/ggml-cuda/fattn-vec.cuh`: instrumentación `TURBO_DIAG_V_READS`
+  (opt-in) que dumpea `pblock`/bytes crudos de V para `seq=1,2,3, k_abs=0`,
+  funciona tanto con `v_ptable` presente como ausente (para diffear
+  paginado vs `LLAMA_NO_PAGING=1`, la comparación válida — ver Parte 2).
+- `ggml/src/ggml-cuda/fattn-common.cuh`, `ggml/src/ggml-cuda/softmax.cu`:
+  `test_coords` ampliado de 4 a 8 coordenadas (masked + allowed
+  off-diagonal × 4 secuencias) bajo `TURBO_DIAG_MASK_PAGED` (opt-in, sin
+  cambio de comportamiento por defecto).
+- `src/llama-kv-cache.cpp`: instrumentación `TURBO_DIAG_V_READS` (opt-in)
+  en `set_input_v_page_table`, dumpea el mapeo fila→stream→pblock escrito
+  para las primeras 2 invocaciones.
+- `ggml/src/ggml-cuda/paged-gather.cu`: instrumentación `TURBO_DIAG_V_READS`
+  (opt-in) agregada por completitud del plan, pero **confirmada como código
+  muerto bajo el wiring actual** (ver Parte 2) — nunca se disparará con
+  ninguna combinación de flags de CLI hasta que se repare/rehabilite la
+  rama Phase 1 de `build_attn`.
+- Build activo (`build/`) en estado limpio: `CMAKE_CUDA_FLAGS`/
+  `CMAKE_CXX_FLAGS` vacíos (sin macros `TURBO_DIAG_*`), `GGML_CUDA_GRAPHS=ON`
+  (default). Con este build, `-fa on --triattention-page-budget 16`
+  **crashea** en ejecución normal (ver arriba) — no usar este build para
+  demos hasta resolver el bug de memoria del kernel VEC.
+- `docs/roadmap.md`: **sin cambios** — el bug de Phase 2 FA sigue sin
+  poder marcarse como resuelto (ver criterios de aceptación arriba).
+- Nada comiteado, como en rondas anteriores. `git status` debe mostrar
+  cambios en: `ggml/src/ggml-cuda/fattn.cu`, `fattn-vec.cuh`,
+  `fattn-common.cuh`, `softmax.cu`, `paged-gather.cu`,
+  `src/llama-kv-cache.cpp`, y este archivo.
+
+### Próximo paso recomendado
+
+1. Recompilar con `-lineinfo` (o usar `cuda-gdb`) y correr
+   `compute-sanitizer --tool memcheck` sobre `flash_attn_ext_vec` para
+   ubicar la línea exacta del acceso fuera de rango dentro del kernel VEC
+   bajo paginación (candidatos: `dequantize_V`, `vec_dot_KQ`, o el puntero
+   de mask `maskh` para el caso `ncols=2`).
+2. Una vez arreglado ese segundo bug, re-validar PPL **sin**
+   `CUDA_LAUNCH_BLOCKING=1` (condición de ejecución normal) antes de
+   marcar el bug de Phase 2 FA como resuelto en `docs/roadmap.md`.
+3. Considerar además si `BEST_FATTN_KERNEL_TILE` (la otra opción del fix
+   de ruteo, para cuando `can_use_vector_kernel` es falso) tiene el mismo
+   problema o no — no se probó en esta ronda porque este workload siempre
+   cae en la rama VEC.

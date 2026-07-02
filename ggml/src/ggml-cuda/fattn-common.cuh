@@ -58,11 +58,19 @@ static __device__ __forceinline__ const char * v_paged_ptr(
         const int32_t             seq,
         const int32_t             n0,
         const int32_t             bs,
-        const int32_t             k_abs) {
+        const int32_t             k_abs,
+        const int32_t             k_max) {
     if (v_ptable) {
         const int32_t lpage  = k_abs / bs;
         const int32_t within = k_abs % bs;
-        const int32_t pblock = v_ptable[seq * n0 + lpage];
+        // k_abs can run past k_max (ne11, the real KV length) on the tail tile of the
+        // KV loop: callers iterate in fixed-size chunks (nthreads for VEC, FATTN_KQ_STRIDE
+        // for TILE) that do not evenly divide the sequence length. Without this guard,
+        // lpage indexes past n_lpage into unrelated/unmapped page-table memory, yielding
+        // a garbage pblock and an out-of-bounds V read once the tail tile's inactive lanes
+        // still execute the dequantize load (the 100% reproducible async crash without
+        // CUDA_LAUNCH_BLOCKING=1). Route out-of-range reads to the dummy sentinel block 0.
+        const int32_t pblock = (k_abs < k_max) ? v_ptable[seq * n0 + lpage] : 0;
 #if defined(TURBO_DIAG_PAGE_ROWS)
         if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k_abs < 8) {
             printf("[PAGE_READ] seq=%d k_abs=%d lpage=%d within=%d pblock=%d phys_row=%lld\n",
@@ -1651,14 +1659,20 @@ void launch_fattn(
                     (size_t)mask->nb[0], (size_t)mask->nb[1], (size_t)mask->nb[2], (size_t)mask->nb[3],
                     ggml_type_name(mask->type));
 
-            const int test_coords[4][3] = {
-                {0, 0, 0},
-                {0, 16, 16},
-                {1, 16, 16},
-                {1, 32, 32},
+            // Round 4: mirror softmax.cu's coordinate set exactly (masked +
+            // allowed off-diagonal positions per sequence, sequences 0..3).
+            const int test_coords[8][3] = {
+                {0, 16, 32}, // s=0, query=16, key=32 (masked, expect -inf)
+                {0, 32, 16}, // s=0, query=32, key=16 (allowed, expect 0)
+                {1, 16, 32}, // s=1, query=16, key=32 (masked, expect -inf)
+                {1, 32, 16}, // s=1, query=32, key=16 (allowed, expect 0)
+                {2, 16, 32}, // s=2, query=16, key=32 (masked, expect -inf)
+                {2, 32, 16}, // s=2, query=32, key=16 (allowed, expect 0)
+                {3, 16, 32}, // s=3, query=16, key=32 (masked, expect -inf)
+                {3, 32, 16}, // s=3, query=32, key=16 (allowed, expect 0)
             };
 
-            for (int tc = 0; tc < 4; ++tc) {
+            for (int tc = 0; tc < 8; ++tc) {
                 const int s   = test_coords[tc][0];
                 const int j   = test_coords[tc][1];
                 const int ic0 = test_coords[tc][2];
