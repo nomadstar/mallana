@@ -40,6 +40,13 @@ HISTORY_LOG = ".multiswarm_history.log"
 HEARTBEAT_INTERVAL = 30  # seconds of silence before printing a status line
 BUILD_POLL_INTERVAL = 3  # seconds between /proc scans for live build/compile jobs
 
+# agy's own `--print` mode has a hardcoded 5-minute default wait (`--print-timeout`,
+# see `agy --help`), independent of anything happening in this script. Any task
+# involving a multi-minute CUDA compile or deep reasoning routinely exceeds that,
+# so agy kills its own turn (nonzero exit) even though real work is still in
+# flight underneath. Give it a much longer budget by default.
+AGY_PRINT_TIMEOUT_DEFAULT = "25m"
+
 # Process names that anchor a build tree (used to detect "the agent kicked off a
 # build" even after the agent's own CLI process has exited/crashed/timed out).
 BUILD_ROOT_NAMES = {"cmake", "make", "ninja"}
@@ -268,7 +275,8 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
     )
     return process
 
-def run_planning(task, iteration, critique=None, model=None, skip_permissions=False, resume=False):
+def run_planning(task, iteration, critique=None, model=None, skip_permissions=False, resume=False,
+                  agy_print_timeout=AGY_PRINT_TIMEOUT_DEFAULT):
     """Phase 1: Architect (agy) designs or refines the plan."""
     if iteration == 1:
         prompt = (
@@ -309,6 +317,7 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
         cmd.extend(["--model", model])
     if resume and iteration > 1:
         cmd.append("--continue")
+    cmd.extend(["--print-timeout", agy_print_timeout])
 
     cmd.extend(["--prompt", prompt])
 
@@ -328,7 +337,8 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
         print(f"{RED}Architect planning failed with return code {res.returncode}.{RESET}")
         return False
 
-def run_implementation(task, iteration, model=None, skip_permissions=False, resume=False, implementer="claude"):
+def run_implementation(task, iteration, model=None, skip_permissions=False, resume=False, implementer="claude",
+                        agy_print_timeout=AGY_PRINT_TIMEOUT_DEFAULT):
     """Phase 2: Implementer writes code changes based on the plan."""
     if not os.path.exists(PLAN_FILE):
         print(f"{RED}Error: Plan file '{PLAN_FILE}' not found!{RESET}")
@@ -372,6 +382,8 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
         cmd.extend(["--model", model])
     if resume and iteration > 1:
         cmd.append("--continue")
+    if implementer == "agy":
+        cmd.extend(["--print-timeout", agy_print_timeout])
 
     cmd.extend([prompt_flag, prompt])
 
