@@ -11,6 +11,7 @@ Roles:
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -601,6 +602,102 @@ def run_audit(scope=None, model=None, agent=None, skip_permissions=False):
     return True
 
 
+# Conclusions that count as a CI failure worth auto-fixing. "cancelled",
+# "skipped" and "neutral" are not actionable; in-progress runs have no
+# conclusion yet and are reported but not treated as failures.
+CI_FAILURE_CONCLUSIONS = {"failure", "timed_out", "startup_failure", "action_required"}
+CI_LOG_TAIL_CHARS = 4000   # tail of --log-failed per run fed to the swarm
+CI_MAX_FAILED_LOGS = 3     # cap on how many failed runs get their logs inlined
+
+
+def git_current_branch():
+    res = subprocess.run(["git", "branch", "--show-current"],
+                         capture_output=True, text=True)
+    return res.stdout.strip() or None
+
+
+def get_ci_runs(branch=None, limit=20):
+    """Fetch recent GitHub Actions runs for this repo via the gh CLI."""
+    cmd = ["gh", "run", "list", "--limit", str(limit),
+           "--json", "databaseId,workflowName,displayTitle,headBranch,event,"
+                     "status,conclusion,url,createdAt"]
+    if branch:
+        cmd.extend(["--branch", branch])
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"'gh run list' failed: {res.stderr.strip()}")
+    return json.loads(res.stdout or "[]")
+
+
+def get_failed_run_log(run_id, max_chars=CI_LOG_TAIL_CHARS):
+    """Return the tail of the failed-step logs for a run (errors live at the end)."""
+    res = subprocess.run(["gh", "run", "view", str(run_id), "--log-failed"],
+                         capture_output=True, text=True)
+    log = res.stdout if res.returncode == 0 else (res.stderr or "")
+    log = log.strip()
+    if len(log) > max_chars:
+        log = "…(truncated)…\n" + log[-max_chars:]
+    return log
+
+
+def report_ci_status(branch=None, limit=20):
+    """Print recent GitHub Actions runs and return the failed ones."""
+    print(f"\n{BOLD}{CYAN}=== GitHub Actions Status ==={RESET}")
+    scope = f"branch '{branch}'" if branch else "all branches"
+    print(f"Scope: {scope} (last {limit} runs)")
+
+    runs = get_ci_runs(branch, limit)
+    if not runs:
+        print(f"{YELLOW}No workflow runs found. Workflows may not be registered "
+              f"yet (a push touching .github/workflows/ registers them).{RESET}")
+        return [], []
+
+    failed = []
+    for run in runs:
+        concl = run.get("conclusion") or run.get("status") or "?"
+        if run.get("conclusion") in CI_FAILURE_CONCLUSIONS:
+            color = RED
+            failed.append(run)
+        elif run.get("conclusion") == "success":
+            color = GREEN
+        else:
+            color = YELLOW
+        print(f"  {color}{concl:<16}{RESET} {run.get('workflowName', '?'):<28} "
+              f"{run.get('headBranch', '?'):<24} {run.get('displayTitle', '')[:48]}")
+
+    if failed:
+        print(f"\n{RED}{len(failed)} failed run(s) detected.{RESET}")
+    else:
+        print(f"\n{GREEN}No failed runs.{RESET}")
+    return failed, runs
+
+
+def build_ci_fix_task(failed_runs):
+    """Compose a swarm task from failed GitHub Actions runs, inlining failed logs."""
+    lines = [
+        "Fix the failing GitHub Actions workflows in this repository. "
+        "Diagnose whether the root cause is in the workflow files "
+        "(.github/workflows/) or in the code/tests they exercise, and apply a "
+        "minimal fix. Failed runs:"
+    ]
+    for i, run in enumerate(failed_runs):
+        lines.append(
+            f"- {run.get('workflowName', '?')} — '{run.get('displayTitle', '')}' "
+            f"on {run.get('headBranch', '?')} ({run.get('conclusion')}): {run.get('url', '')}"
+        )
+        if i < CI_MAX_FAILED_LOGS:
+            log = get_failed_run_log(run.get("databaseId"))
+            if log:
+                lines.append(f"Failed-step log (tail):\n```\n{log}\n```")
+    lines.append(
+        "NOTE: GitHub Actions cannot be re-run locally; validate by making the "
+        "local build and tests pass and, in the summary, explain why the CI "
+        "failure is resolved. Do NOT push or trigger remote workflows — the "
+        "repository owner pushes after review."
+    )
+    return "\n".join(lines)
+
+
 def check_success():
     """Verify if the critique step declared success.
 
@@ -642,6 +739,17 @@ def main():
     parser.add_argument("--audit-scope",
                         help="What to audit in --audit mode (e.g. 'src/llama-kv-cache.cpp Phase 2 FA fix'). "
                              "Defaults to all staged + unstaged changes.")
+    parser.add_argument("--ci-status", action="store_true",
+                        help="Print recent GitHub Actions run status (via gh) and exit. "
+                             "Exit code 1 if there are failed runs.")
+    parser.add_argument("--ci-fix", action="store_true",
+                        help="Check GitHub Actions for failed runs; if any, auto-generate a fix task "
+                             "from the failed logs and run the full swarm loop on it.")
+    parser.add_argument("--ci-branch",
+                        help="Branch filter for --ci-status/--ci-fix (default: all branches; "
+                             "use 'current' for the checked-out branch)")
+    parser.add_argument("--ci-limit", type=int, default=20,
+                        help="How many recent runs to inspect in --ci-status/--ci-fix (default: 20)")
     parser.add_argument("--iterations", type=int, default=3, help="Max iterations/loops (default: 3)")
     parser.add_argument("--skip-permissions", action="store_true", help="Auto-approve tool permissions (skip prompts)")
     parser.add_argument("--no-interactive", action="store_true", help="Run without asking for confirmation between phases")
@@ -676,6 +784,32 @@ def main():
             skip_permissions=args.skip_permissions,
         )
         sys.exit(0 if ok else 1)
+
+    # CI modes: report GitHub Actions status; --ci-fix feeds failures into the swarm loop
+    if args.ci_status or args.ci_fix:
+        if not check_cli_tool("gh"):
+            print(f"{RED}Error: 'gh' (GitHub CLI) not found in PATH.{RESET}")
+            sys.exit(1)
+        branch = args.ci_branch
+        if branch == "current":
+            branch = git_current_branch()
+        try:
+            failed_runs, _all_runs = report_ci_status(branch, args.ci_limit)
+        except RuntimeError as e:
+            print(f"{RED}Error: {e}{RESET}")
+            sys.exit(1)
+        if args.ci_status:
+            sys.exit(1 if failed_runs else 0)
+        # --ci-fix
+        if not failed_runs:
+            print(f"{GREEN}Nothing to fix — CI is green.{RESET}")
+            sys.exit(0)
+        if args.task:
+            print(f"{YELLOW}Warning: --task is ignored with --ci-fix "
+                  f"(task is generated from the CI failures).{RESET}")
+        print("Collecting failed logs and generating fix task...")
+        args.task = build_ci_fix_task(failed_runs)
+        log_session(f"CI-fix mode: generated task from {len(failed_runs)} failed run(s)")
 
     if not args.task:
         parser.error("--task is required unless --audit is specified")
