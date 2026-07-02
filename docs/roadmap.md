@@ -21,12 +21,15 @@
 | TriAttention calibration infrastructure (M007) | ✅ |
 | Phase 2 FA n_seq OOB fix | ✅ |
 | CI correctness fixes (state serialization guards, EditorConfig) | ✅ |
+| Repo detached from `atomicmilkshake/llama-cpp-turboquant` fork network, renamed to `nomadstar/mallana` | ✅ |
+| Phase 2 FA tensor-graph wiring hardened (recursive DFS + explicit abort; H1 ruled out empirically) | ✅ |
+| multiswarm.py: live build/compile progress from `/proc`, pause-until-build-done, agy `--print-timeout` fix | ✅ |
 
 ### Upcoming
 
 | Milestone | Priority |
 |---|---|
-| Paged Attention Phase 2 — numerical validation (n_seq bug fixed) | P2 |
+| **Paged Attention Phase 2 — PPL=35125+ bug, root cause still open** (see below) | P1 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |
@@ -126,7 +129,7 @@ on a validated foundation.
 | `LLAMA_NO_PAGING` env var gate | P1 | ✅ |
 | Fix device sync race in paged KV write | P1 | ✅ |
 | Fix K-cache isolation (flat pool indices) | P1 | ✅ |
-| Phase 2: Native paged FA (n_seq bug fixed — pending numerical validation) | P2 | 🔄 Needs validation |
+| Phase 2: Native paged FA — PPL=35125-38849 with `-fa on`+paging (baseline ~9.7). Tensor-graph wiring, page-table address math, and write/read row agreement all verified correct with empirical evidence (raw pool bytes at the resolved physical row are real, non-garbage data). Bug is downstream in the kernel compute path — see `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-01 update) for ruled-out hypotheses and next leads (`flash_attn_mask_to_KV_max`, gqa_ratio/mask-stride in the paged branch). | P1 | 🔴 Blocked |
 | Phase 3: TriAttention KV eviction (H6.1 pending gen-mode eval) | P4 | 🔄 Implemented |
 | Phase 4: TurboQuant-aware block alignment | P2 | ⬜ Pending |
 | Sliding window support | P2 | ⬜ Pending |
@@ -190,14 +193,19 @@ has not yet been scheduled.
 
 ## Immediate Next Steps
 
-1. **Validate Phase 2 paged FA** (`-fa on` without `-fa off` workaround): run
-   `llama-perplexity` with `--triattention-page-budget` and confirm PPL matches the
-   no-paging baseline. The n_seq OOB bug is fixed; this step closes the validation gap.
-2. **H6.1 generation-mode evaluation**: write `scripts/triattention_generation_eval.py`
-   to test TriAttention eviction quality in autoregressive mode (the only mode where
-   eviction actually fires — batch mode protects all pages from eviction).
+1. **[P1] Continue Phase 2 paged FA debugging.** Root cause is not the tensor-graph
+   wiring, not the page-table address math, and not a write/read row mismatch — all
+   three were empirically disproven (see `research/milestone-008/phase2-fa-debug-handoff.md`,
+   2026-07-01 update). Next: instrument `flash_attn_mask_to_KV_max`
+   (`ggml/src/ggml-cuda/fattn-common.cuh`) and the gqa_ratio/mask-stride handling in the
+   paged branch of `build_attn` (`src/llama-graph.cpp` ~2130-2183), comparing against the
+   working `-fa off` path with the same prompt. Use empirical probes (printed/dumped real
+   values), not static reading alone — that already produced two plausible-but-wrong
+   hypotheses this round.
+2. **H6.1 generation-mode evaluation**: `scripts/triattention_generation_eval.py` is written;
+   run it once Phase 2 paged FA is fixed (it depends on `-fa on` + paging being correct).
 3. **Large-scale benchmarks**: Systematic benchmark harness across multiple GPUs, model
-   sizes, and context lengths.
+   sizes, and context lengths. Blocked on Phase 2 FA fix for the `-fa on` numbers.
 4. **Upstream synchronization**: Rebase against latest `ggml-org/llama.cpp` master to
    incorporate upstream fixes and features.
 5. **Expand validation**: Add more model families to the validation suite (Gemma, Mistral,

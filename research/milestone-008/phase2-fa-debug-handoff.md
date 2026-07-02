@@ -290,3 +290,79 @@ build/bin/llama-perplexity -m qwen2.5-coder-1.5b-bf16.gguf \
 - **NUNCA** commitear API keys, tokens, passwords
 - Credenciales solo via env vars o archivos en .gitignore
 - Revisar archivos modificados antes de `git commit`
+
+---
+
+## Update — 2026-07-01
+
+**Estado:** Bloqueado — PPL sigue en ~35000-38000 con `-fa on` + paging activo. H1 **descartada** con evidencia empírica. Bug acotado a otra parte del path.
+
+### H1 descartada (con prueba, no solo razonamiento)
+
+Se reemplazó el while-loop frágil de búsqueda de `GGML_OP_FLASH_ATTN_EXT` por una
+búsqueda DFS recursiva acotada (`find_flash_attn_ext`, commit `e0e3486dc`,
+`src/llama-graph.cpp`), que además aborta explícitamente si no encuentra el
+tensor (en vez de fallar silenciosamente en release). El diagnóstico
+`TURBO_DIAG_FA_PAGED` confirma que la page table SÍ llega correctamente al
+kernel: `v_ptable_ne0=8`, `nb21=512`, `nb22=256`, `ptable[0..7]=1,2,3,4,0,0,0,0`
+— todo consistente con lo esperado. **PPL no cambió tras el fix (sigue en
+35125.27)**, confirmando que H1 no era la causa raíz.
+
+### Nuevas hipótesis descartadas (esta ronda, con prueba)
+
+1. **Colisión multi-secuencia**: descartada. El bug reproduce incluso con
+   `--chunks 1` (fuerza `n_seqs=1`, una sola secuencia activa) → PPL=8285.60
+   (roto igual, sin secuencias concurrentes de por medio).
+2. **Desacuerdo write/read de fila física**: descartada. Se agregó
+   instrumentación `TURBO_DIAG_PAGE_ROWS` (opt-in, commit `d57d50028`) tanto en
+   el lado de escritura (`set_input_v_idxs`, `src/llama-kv-cache.cpp`) como en
+   el de lectura (`v_paged_ptr`, `ggml/src/ggml-cuda/fattn-common.cuh`). Para
+   la página lógica 0, ambos lados resuelven independientemente `pblock=1` →
+   `phys_row=32`. Idénticos.
+3. **Datos corruptos/no escritos en el pool**: descartada. Se volcaron los
+   bytes crudos del pool en `phys_row=32` tras el kernel launch: valores half
+   reales y variados (ej. `0.084, 0.29, -0.009...`), no ceros ni basura. La
+   fila 0 (bloque dummy/sentinela) sí lee todo-cero correctamente. La
+   escritura ocurre de verdad, en la dirección exacta que el kernel lee.
+
+### Conclusión de esta ronda
+
+La corrupción **no está** en el wiring del tensor-graph, ni en el cálculo de
+direcciones físicas, ni en que falte escribir datos reales. Está en otra parte
+del compute path del kernel FA paginado. Pistas concretas sin verificar aún:
+
+- `flash_attn_mask_to_KV_max` en `ggml/src/ggml-cuda/fattn-common.cuh` — deriva
+  el límite de iteración KV del kernel escaneando la mask; nunca se verificó
+  específicamente contra el branch paginado de V.
+- Manejo de `gqa_ratio` / stride de la mask en el branch paginado de
+  `llm_graph_context::build_attn` (`src/llama-graph.cpp` ~líneas 2130-2183).
+
+### Validación actual (sin regresión en los paths que ya funcionaban)
+
+```
+Paged, -fa on, --triattention-page-budget 16, --chunks 10:
+  PPL = 38849.78   (roto, esperado ~9.7)
+Paged, -fa on, --chunks 1 (fuerza n_seqs=1):
+  PPL = 8285.60    (roto igual, descarta colisión multi-secuencia)
+Paged, -fa off (gather path), --chunks 5:
+  PPL = 9.7094     (correcto, sin cambios)
+LLAMA_NO_PAGING=1, -fa on, --chunks 5:
+  PPL = 9.7214     (correcto, sin cambios)
+```
+
+### Commits de esta ronda
+
+| Commit | Contenido |
+|--------|-----------|
+| `e0e3486dc` | Reemplaza while-loop frágil por DFS recursivo + abort explícito (H1 descartada) |
+| `d57d50028` | Instrumentación `TURBO_DIAG_PAGE_ROWS` (opt-in, sin cambio de comportamiento) |
+
+### Próximo paso recomendado
+
+Instrumentar `flash_attn_mask_to_KV_max` y el branch paginado de `build_attn`
+para el manejo de `gqa_ratio`/mask-stride, comparando contra el path
+`-fa off` (que sí funciona) para el mismo prompt. Repetir la metodología de
+esta ronda: probar con evidencia empírica (valores reales impresos/volcados),
+no solo lectura estática del código — la lectura estática ya descartó dos
+hipótesis plausibles que resultaron correctas en el papel pero no en la
+práctica.
