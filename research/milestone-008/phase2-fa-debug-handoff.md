@@ -366,3 +366,349 @@ esta ronda: probar con evidencia empírica (valores reales impresos/volcados),
 no solo lectura estática del código — la lectura estática ya descartó dos
 hipótesis plausibles que resultaron correctas en el papel pero no en la
 práctica.
+
+---
+
+## Update — 2026-07-02: `flash_attn_mask_to_KV_max` descartada (con prueba)
+
+**Estado:** Bloqueado — PPL sigue en ~38849 con `-fa on` + paging activo, `--chunks
+10`. Se descarta empíricamente la hipótesis del fast-path `KV_max` como causa
+(única o compuesta) del bug. Bug sigue acotado al resto del compute path
+paginado del kernel FA.
+
+Nota aparte (trace estático, sesión previa a esta): el cálculo de addressing
+de `gqa_ratio` en sí (`fattn-vec.cuh:124-128`, offset de head aplicado una
+sola vez sobre `V_paged_base` antes de `v_paged_ptr`, `gqa_ratio = ne02/ne12`
+tomado de `K->ne[2]`, no de la vista paginada de V) ya fue revisado
+línea por línea vía el grafo de código y es matemáticamente consistente con
+lo que `TURBO_DIAG_FA_PAGED` había verificado empíricamente (`nb21=512,
+nb22=256`). Eso descarta la aritmética de `gqa_ratio` puntualmente. Lo que
+queda sin verificar del lead original es el manejo de **stride de la mask**
+en el branch paginado (no `gqa_ratio` en sí) — ver más abajo.
+
+### Nota de entorno: repo detach rompió el build dir
+
+Antes de correr el experimento, `cmake --build` falló:
+
+```
+CMake Error: The current CMakeCache.txt directory ... is different than the
+directory /home/ignatus/GitHub/llama-cpp-turboquant/build where CMakeCache.txt
+was created. The source directory "/home/ignatus/GitHub/llama-cpp-turboquant"
+does not exist.
+```
+
+Confirma el "repo detach" ya anotado en el commit `95ab89c01` (rename
+`llama-cpp-turboquant` → `mallana`). Workaround aplicado (fuera del repo git,
+no versionado): `ln -s /home/ignatus/GitHub/mallana
+/home/ignatus/GitHub/llama-cpp-turboquant`. Con el symlink en su lugar,
+`cmake --build build` funciona sin reconfigurar ni recompilar desde cero. El
+symlink queda vivo en el filesystem del host para que sesiones futuras no
+tropiecen con lo mismo; no requiere ninguna acción en git.
+
+### Experimento: deshabilitar el fast-path `KV_max`
+
+Se gateó la condición de `ggml/src/ggml-cuda/fattn-common.cuh:1455`
+(`flash_attn_mask_to_KV_max`) detrás de una macro diagnóstica opt-in, en el
+mismo estilo que `TURBO_DIAG_FA_PAGED`/`TURBO_DIAG_PAGE_ROWS` ya existentes:
+
+```cpp
+#if defined(TURBO_DIAG_DISABLE_KV_MAX)
+if (false && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+#else
+if (mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+#endif
+```
+
+Sin la macro definida (comportamiento default, sin cambios), el fast-path
+sigue activo tal como estaba. Este bloque queda en el árbol de trabajo
+(no commiteado) tal como los otros `TURBO_DIAG_*`.
+
+### Resultados (build `qwen2.5-coder-1.5b-bf16.gguf`, `-c 512 --chunks 10 -ngl 99 --triattention-page-budget 16`)
+
+```
+LLAMA_NO_PAGING=1, -fa on:
+  PPL = 12.2762   (correcto — chunks 10; consistente con ~9.7 reportado para chunks 5)
+
+Paged, -fa off (gather path):
+  PPL = 12.2763   (correcto, sin regresión frente a LLAMA_NO_PAGING)
+
+Paged, -fa on (buggy, ANTES del cambio — KV_max fast-path activo, default):
+  PPL = 38849.7815
+  per-chunk: 23181.78,39044.76,39236.25,48435.47,39480.73,37305.15,32432.57,35913.84,35592.74,38849.78
+
+Paged, -fa on (KV_max fast-path DESHABILITADO vía TURBO_DIAG_DISABLE_KV_MAX):
+  PPL = 38849.7815
+  per-chunk: 23181.78,39044.76,39236.25,48435.47,39480.73,37305.15,32432.57,35913.84,35592.74,38849.78
+```
+
+Los números son **idénticos byte a byte**, per-chunk y en el estimado final,
+con y sin el fast-path `KV_max`. El diagnóstico `TURBO_DIAG_FA_PAGED` (activo
+en ambas corridas) confirma además que `Q->ne[3]=4` (4 streams paralelos, como
+predecía el plan — `--chunks 10` sí produce `Q->ne[3] > 1`), es decir el
+fast-path **sí se estaba activando** en la corrida "buggy" (no es que la
+condición nunca se cumpliera) y aun así deshabilitarlo no cambió nada.
+
+### Conclusión
+
+**`flash_attn_mask_to_KV_max` queda descartada como causa del bug**, tanto en
+su forma "bug único" como en la forma "segundo bug compuesto sobre el bug
+base". El fast-path se ejecuta (`Q->ne[3]=4 > 1`) en la corrida rota, y
+deshabilitarlo por completo no altera ni un solo valor de PPL por chunk. La
+corrupción sigue localizada en el resto del compute path paginado del kernel
+(lectura/cómputo de V vía page table dentro del kernel FA en sí, no en el
+paso previo de determinar el límite KV a iterar).
+
+Del lead original de la ronda anterior ("manejo de `gqa_ratio`/stride de la
+mask en el branch paginado de `build_attn`"), la parte de `gqa_ratio` ya fue
+descartada por trace estático (ver nota arriba) — el candidato más
+prometedor que queda sin verificar es específicamente el **stride de la
+mask** en ese mismo branch paginado (`src/llama-graph.cpp` ~líneas
+2130-2183), comparado explícitamente contra el path `-fa off` que sí
+funciona.
+
+### Estado del árbol de trabajo al cerrar esta ronda
+
+- `ggml/src/ggml-cuda/fattn-common.cuh`: bloque `TURBO_DIAG_DISABLE_KV_MAX`
+  agregado (opt-in, sin macro definida por defecto — comportamiento idéntico
+  al de antes de esta ronda cuando se compila sin flags extra).
+- Build actual (`build/`) compilado **sin** `TURBO_DIAG_DISABLE_KV_MAX`
+  definida (`CMAKE_CUDA_FLAGS = -DTURBO_DIAG_FA_PAGED -DTURBO_DIAG_PAGE_ROWS`,
+  igual que al inicio de la sesión) — el fast-path `KV_max` está activo por
+  defecto, como en producción.
+- Nada comiteado. `git status` debería mostrar solo el cambio en
+  `fattn-common.cuh` (más lo que ya estuviera sucio de antes, ej.
+  `scripts/multiswarm.py`, no tocado en esta ronda).
+- Symlink de host `~/GitHub/llama-cpp-turboquant → ~/GitHub/mallana`: no es
+  parte del repo git, pero es necesario para que `cmake --build build`
+  funcione sin reconfigurar desde cero. Ver nota de "repo detach" arriba.
+
+---
+
+## Update — 2026-07-02 (ronda 2): mask-stride en el branch paginado también descartada (con prueba)
+
+**Estado:** Bloqueado — PPL sigue en 38849.7815 con `-fa on` + paging, `--chunks 10`
+(sin cambios respecto a la ronda anterior). Se descarta empíricamente el único
+lead restante del plan original ("manejo de stride de la mask en el branch
+paginado de `build_attn`"). Bug sigue acotado a otra parte del compute path
+paginado del kernel FA, aún no identificada.
+
+### Contexto de esta ronda
+
+Al retomar la sesión, el árbol de trabajo ya contenía instrumentación
+`TURBO_DIAG_MASK_PAGED` parcialmente escrita en `ggml/src/ggml-cuda/softmax.cu`
+(dump del lado `-fa off`, path `ggml_cuda_op_soft_max`) y en
+`ggml/src/ggml-cuda/fattn-common.cuh` (dump del lado `-fa on`, path
+`launch_fattn`, justo antes del kernel launch), y el build activo (`build/`)
+ya tenía `CMAKE_CUDA_FLAGS=-DTURBO_DIAG_MASK_PAGED`. Aparentemente quedó a
+medio terminar de un intento anterior (no documentado en este handoff). Se
+verificó el código, se refinó el filtro de captura (ver abajo) y se completó
+el experimento.
+
+### Hallazgo estructural: `build_attn` usa el MISMO tensor de mask para ambos paths
+
+Antes de instrumentar, se confirmó por lectura del grafo
+(`src/llama-graph.cpp:2119, 2201` y `src/llama-graph.h:271-312`) que el
+branch paginado de `build_attn` (líneas ~2130-2183) construye la vista 4D de
+`v` (pool + page table) de forma condicional a `cparams.flash_attn`, pero
+**`kq_mask` se obtiene una sola vez, antes de esa rama, vía
+`inp->get_kq_mask()`, y se pasa sin modificación a `build_attn_mha`** tanto
+en el branch FA (`ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, ...)`, línea
+1836) como en el branch softmax (`ggml_soft_max_ext(ctx0, kq, kq_mask, ...)`,
+línea 1910). El único tratamiento diferencial es el cast a F16
+(`self_kq_mask_cnv = cparams.flash_attn ? ggml_cast(..., F16) : ...`,
+`llama-graph.cpp:2055`). Es decir: **no existe, en el código actual, una
+rama de "stride de mask específica del path paginado"** — la hipótesis del
+plan asumía una bifurcación de stride que no está presente; la única
+diferencia estructural posible es la conversión F32→F16.
+
+### Experimento: dump de `ne[]`/`nb[]`/valores reales del mask en ambos paths
+
+Se refinó el filtro de captura en ambas sondas (`s_mask_diag`) para que
+solo dispare cuando `mask->ne[3] > 1` (multi-stream, el caso donde ocurre el
+bug — con `--chunks 1` no hay streams paralelos), en vez de capturar
+indiscriminadamente las primeras 3 invocaciones (que con `--chunks 10`
+correspondían al primer chunk single-stream, no representativo). Recompilado
+`llama-perplexity` y corridos ambos paths para el mismo modelo/prompt:
+
+```
+-fa off (gather, funciona, PPL=12.2763):
+  [MASK_DIAG_SOFTMAX] mask.ne=[256,128,1,4] mask.nb=[4,1024,131072,131072] type=f32
+  [MASK_DIAG_SOFTMAX] mask[0..7]: 0 -inf -inf -inf -inf -inf -inf -inf
+
+-fa on (paged FA, roto, PPL=38849.7815):
+  [MASK_DIAG_FA] mask.ne=[256,128,1,4] mask.nb=[2,512,65536,65536] type=f16
+  [MASK_DIAG_FA] mask[0..7]: 0 -inf -inf -inf -inf -inf -inf -inf
+```
+
+**Análisis:** `ne[]` es idéntico byte a byte entre ambos paths:
+`[256,128,1,4]` = `[n_kv, n_batch/n_stream, 1, n_stream]` en los dos casos.
+Los strides (`nb[]`) son consistentes con un tensor contiguo estándar,
+escalado exactamente 2× por el tamaño de elemento (F32→F16):
+`nb01_f32=4→nb01_f16=2`, `nb1_f32=1024→nb1_f16=512`,
+`nb2/nb3_f32=131072→nb2/nb3_f16=65536` — es decir `nb[i]_f16 = nb[i]_f32 / 2`
+en todas las dimensiones, exactamente lo esperado de un `ggml_cast` a F16 sin
+ninguna otra transformación de layout. Los primeros 8 valores (posición
+causal-diagonal, columna 0 = atendible, columnas 1-7 = enmascaradas) son
+idénticos en ambos paths.
+
+Con esto, el `ne[]`/`nb[]` del tensor de mask y sus primeros 8 valores
+(offset 0, `sequence=0, ic0=0`) son idénticos entre ambos paths. Esto por sí
+solo **no** prueba todavía que el direccionamiento del kernel CUDA
+(`maskh = mask + nb33*(sequence % ne33) + nb31*ic0`, `fattn-vec.cuh:131`)
+lea la misma fila lógica que `ggml_soft_max_ext` para `sequence > 0` o
+`ic0 > 0` — solo se comparó el offset base. Instrumentación adicional
+(`[MASK_DIAG_FA]` / `[MASK_DIAG_SOFTMAX]` con lectura en coordenadas
+`(sequence, query, key)` emparejadas vía la fórmula de indexado de cada
+kernel, y `[GRAPH_DIAG_MASK]` en `build_attn_mha` confirmando que ambos
+paths reciben el mismo objeto `kq_mask` en tiempo de construcción del grafo)
+se añadió para cerrar esta brecha; los valores dumped en esas coordenadas
+para `sequence > 0` / `ic0 > 0` aún deben ejecutarse y compararse antes de
+descartar el lead.
+
+### Conclusión (provisional)
+
+**El lead de "stride de la mask en el branch paginado" NO puede darse aún
+por descartado con evidencia empírica completa.** Lo verificado hasta ahora
+(mismo `ne[]`, mismo layout salvo escala de tipo F32→F16, mismos valores en
+el offset base) solo descarta diferencias groseras de forma/stride
+contiguo y corrupción de valores en la fila base — no descarta una
+desalineación específica de paging en filas/tiles distintos de cero. Con
+`gqa_ratio` (ronda 1) y `flash_attn_mask_to_KV_max` (ronda 1) descartados
+con prueba, y mask-stride pendiente de la verificación en coordenadas
+emparejadas descrita arriba, el candidato más probable sigue siendo el
+cómputo interno del kernel paginado (lectura/dequantización de V vía
+`v_paged_ptr` + acumulación KQV dentro de `fattn-vec.cuh`), pero mask-stride
+permanece abierto hasta correr la instrumentación nueva.
+
+Pista concreta sin verificar aún, visible en `fattn-vec.cuh:122-128`:
+
+```cpp
+const int sequence = blockIdx.z / ne02;
+...
+V += (v_ptable ? (int64_t)0 : nb23*sequence) + nb22*(head / gqa_ratio);
+```
+
+Cuando `v_ptable` está activo, el offset `nb23*sequence` se omite
+deliberadamente (la página física ya codifica la secuencia vía
+`v_ptable[seq*n0+lpage]` dentro de `v_paged_ptr`). Esto fue revisado
+estáticamente y es consistente en el papel, pero **nunca se verificó con
+valores reales que, para `sequence` > 0 (streams 1..3 del batch de 4
+streams paralelos de esta corrida), el page table efectivamente resuelva
+filas físicas distintas y correctas** — el diagnóstico `TURBO_DIAG_PAGE_ROWS`
+de la ronda anterior sólo confirmó `pblock`/`phys_row` para la página lógica
+0 sin especificar para qué `seq`. Dado que el bug persiste incluso con
+`--chunks 1` (`n_seqs=1`, sin streams paralelos — ver ronda 1), esta pista
+por sí sola no explica el bug base, pero no se ha verificado si hay una
+segunda ruta de corrupción independiente aquí. Recomendado para la próxima
+ronda: instrumentar `v_paged_ptr` (ya tiene el gancho `TURBO_DIAG_PAGE_ROWS`)
+para imprimir `seq` explícitamente y correr con `--chunks 1` comparando
+valores reales de V leídos por el kernel contra los mismos valores leídos
+por el path `-fa off` (gather), byte a byte, en vez de sólo direcciones
+calculadas — la ronda 1 ya verificó que los *bytes en el pool* son reales y
+no basura, pero no verificó que el kernel FA en sí los combine/pondere
+correctamente en la acumulación softmax-QKV interna.
+
+### Estado del árbol de trabajo al cerrar esta ronda
+
+- `ggml/src/ggml-cuda/softmax.cu` y `ggml/src/ggml-cuda/fattn-common.cuh`:
+  instrumentación `TURBO_DIAG_MASK_PAGED` completa en ambos archivos
+  (opt-in, sin macro definida por defecto). Se ajustó el filtro de captura
+  en ambos (`s_mask_diag`) para disparar sólo cuando `mask->ne[3] > 1`
+  (caso multi-stream, representativo del escenario roto) en vez de las
+  primeras 3 invocaciones sin filtrar.
+- Build actual (`build/`) compilado **con** `-DTURBO_DIAG_MASK_PAGED` (además
+  de `TURBO_DIAG_FA_PAGED` y `TURBO_DIAG_PAGE_ROWS` de rondas anteriores) —
+  no representa el build de producción; recompilar sin esas macros antes de
+  cualquier benchmark que no sea diagnóstico.
+- `roadmap.md` (`research/roadmap.md`): sin cambios — Milestone 003 ya
+  refleja correctamente el estado real (`✅ IMPLEMENTADO — pendiente
+  validación numérica GPU`), no se marca como completado.
+- Nada comiteado. `git status` debería mostrar los cambios en
+  `fattn-common.cuh`, `softmax.cu`, este archivo, y lo que ya estuviera sucio
+  de antes (`scripts/multiswarm.py`, no tocado en esta ronda).
+- Symlink de host `~/GitHub/llama-cpp-turboquant → ~/GitHub/mallana` sigue
+  vivo y necesario (ver nota de ronda anterior).
+
+---
+
+## Update — 2026-07-02 (ronda 3)
+
+### Instrumentación de coordenadas emparejadas
+
+La ronda 2 sólo comparó `ne[]`/`nb[]`/tipo y los primeros 8 valores desde el
+offset 0 del tensor de mask — insuficiente para probar que el *indexado
+lógico* del kernel (que depende de `sequence % ne33` y del tile de query
+`ic0`) lee la misma fila en ambos paths para `sequence > 0` o `ic0 > 0`.
+Se reescribió la instrumentación en ambos archivos para calcular el
+`byte_offset` con la fórmula real de cada kernel y leer el valor en 4
+coordenadas `(sequence, query, key)` emparejadas: `(0,0,0)`, `(0,16,16)`,
+`(1,16,16)`, `(1,32,32)`:
+
+- **FA (`fattn-common.cuh`):** `mask + nb33*(sequence % ne33) + j*nb31 + ic0*nb30`
+- **Softmax (`softmax.cu`):** `src1_d + (s % ne13)*nb13 + (h % ne12)*nb12 + j*nb11 + ic0*nb10` (h=0)
+
+También se añadió `[GRAPH_DIAG_MASK]` en `build_attn_mha`
+(`src/llama-graph.cpp`), que imprime el puntero/`ne[]`/`nb[]`/tipo del
+`kq_mask` recibido en cada capa, en tiempo de construcción del grafo.
+
+### Resultado
+
+Build con `-DTURBO_DIAG_MASK_PAGED` (CXX y CUDA), corrida con
+`-c 512 --chunks 5 -ngl 99 --triattention-page-budget 16`:
+
+- `-fa off`: `[MASK_DIAG_SOFTMAX] mask.ne=[256,128,1,4] mask.nb=[4,1024,131072,131072] type=f32`.
+  Las 4 coordenadas dan `val=0` con offsets `0, 16448, 147520, 163968`.
+- `-fa on`: `[MASK_DIAG_FA] mask.ne=[256,128,1,4] mask.nb=[2,512,65536,65536] type=f16`.
+  Las 4 coordenadas dan `val=0` con offsets `0, 8224, 73760, 81984` — exactamente
+  la mitad de los offsets del path F32 (consistente con el cast a F16), y
+  **el mismo valor lógico (0 = posición atendible)** en cada una de las 4
+  coordenadas emparejadas, incluyendo `sequence=1` con `ic0=16` y `ic0=32`.
+
+**Conclusión: el lead de "stride/indexado de la mask en el branch paginado"
+queda descartado de forma concluyente.** No sólo la forma/stride/valores en
+offset 0 coinciden (ronda 2): ahora se probó, con la fórmula de indexado
+real de cada kernel, que ambos paths leen el mismo valor lógico en
+coordenadas `(sequence, query, key)` no triviales, incluyendo `sequence=1`.
+`[GRAPH_DIAG_MASK]` confirma además que ambos paths comparten el mismo
+puntero `kq_mask` en tiempo de construcción del grafo (mismo `il`, mismo
+`kq_mask_ptr` en cada capa) — no hay una copia o transformación adicional
+introducida sólo para el path paginado antes del cast a F16.
+
+### El fix de `find_flash_attn_ext` (DFS) no resuelve el bug
+
+El plan de esta ronda asumía que el bug era el walk-back loop frágil en
+`build_attn` (`src/llama-graph.cpp`) que no atravesaba `GGML_OP_CONT` y caía
+al fallback de llamar `ggml_flash_attn_ext_set_page_table` sobre el tensor
+equivocado. Ese fix (DFS acotada + `GGML_ABORT` si no encuentra el tensor)
+**ya estaba commiteado** (`e0e3486dc — fix: replace fragile FA-tensor
+while-loop with recursive DFS + hard abort`) antes de esta ronda. Se
+verificó que sigue activo (`find_flash_attn_ext` en
+`src/llama-graph.cpp:2069`, usado en `build_attn` línea 2203) y que el build
+no aborta (si el DFS no encontrara el tensor `GGML_OP_FLASH_ATTN_EXT`, el
+`GGML_ABORT` haría fallar la corrida inmediatamente — no fue el caso).
+
+A pesar de que este fix está activo y funcionando (encuentra y setea la
+page table sobre el tensor `GGML_FLASH_ATTN_EXT` correcto), **la corrida de
+validación de esta ronda sigue dando `PPL = 35125.2709` con `-fa on`**,
+idéntico a las rondas anteriores. Esto confirma que el walk-back del tensor
+FA **no era la causa raíz** — sólo un bug real pero independiente que ya fue
+corregido sin efecto sobre el síntoma principal.
+
+### Estado y próxima pista
+
+Con `gqa_ratio` (ronda 1), `flash_attn_mask_to_KV_max` (ronda 1),
+mask-stride/indexado (rondas 2-3, ahora con prueba concluyente) y el walk
+del tensor FA (esta ronda, ya commiteado sin efecto) descartados, el bug
+**no está en ninguno de los inputs/parámetros que llegan al kernel FA ni en
+el tensor sobre el que se setea la page table** — el fallback bug real
+existía pero no es la causa de PPL=35125. Queda acotado al cómputo interno
+del kernel paginado en sí: lectura/dequantización de V vía `v_paged_ptr` y
+acumulación KQV dentro de `fattn-vec.cuh`, en código que sólo se ejecuta
+cuando `v_ptable` está activo. La pista concreta sin verificar de la ronda
+2 (`V += (v_ptable ? (int64_t)0 : nb23*sequence) + ...` en
+`fattn-vec.cuh:122-128`, y la resolución de `v_paged_ptr[seq]` para
+`sequence > 0`) sigue siendo la recomendación principal para la próxima
+ronda — instrumentar `TURBO_DIAG_PAGE_ROWS` para imprimir `seq` explícito y
+comparar valores de V leídos por el kernel FA paginado, byte a byte, contra
+los del path gather (`-fa off`) para las mismas coordenadas `(seq, lpage,
+head, dim)`.

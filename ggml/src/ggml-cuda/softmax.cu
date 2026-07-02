@@ -402,6 +402,66 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     const bool use_f16 = (src1 && src1->type == GGML_TYPE_F16);
 
+#if defined(TURBO_DIAG_MASK_PAGED)
+    // Mask stride diagnostic (-fa off / gather path): dump mask ne[]/nb[] and, at a set of
+    // matched (sequence, query, key) coordinates, the byte offset and value computed with
+    // the kernel's own logical indexing formula (h=0):
+    //   src1_d + (s % ne13)*nb13 + (h % ne12)*nb12 + j*nb11 + ic0*nb10
+    // so it can be diffed 1:1 against the -fa on path's TURBO_DIAG_MASK_PAGED dump in
+    // ggml-cuda/fattn-common.cuh (which uses the analogous FA mask indexing) for the same
+    // prompt/chunk, confirming whether paging desyncs which mask row maps to which V page.
+    if (src1) {
+        static int s_mask_diag = 0;
+        if (src1->ne[3] > 1 && s_mask_diag++ < 3) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            fprintf(stderr,
+                    "[MASK_DIAG_SOFTMAX] mask.ne=[%lld,%lld,%lld,%lld] mask.nb=[%zu,%zu,%zu,%zu] type=%s\n",
+                    (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
+                    (size_t)src1->nb[0], (size_t)src1->nb[1], (size_t)src1->nb[2], (size_t)src1->nb[3],
+                    ggml_type_name(src1->type));
+
+            const int test_coords[4][3] = {
+                {0, 0, 0},
+                {0, 16, 16},
+                {1, 16, 16},
+                {1, 32, 32},
+            };
+
+            for (int tc = 0; tc < 4; ++tc) {
+                const int s   = test_coords[tc][0];
+                const int j   = test_coords[tc][1];
+                const int ic0 = test_coords[tc][2];
+                const int h   = 0;
+
+                if (s < src1->ne[3] && j < src1->ne[1] && ic0 < src1->ne[0]) {
+                    const int64_t ne13_val = src1->ne[3];
+                    const int64_t ne12_val = src1->ne[2];
+                    const int64_t nb13_val = src1->nb[3];
+                    const int64_t nb12_val = src1->nb[2];
+                    const int64_t nb11_val = src1->nb[1];
+                    const int64_t nb10_val = src1->nb[0];
+
+                    const size_t byte_offset = (size_t)(s % ne13_val) * nb13_val + (size_t)(h % ne12_val) * nb12_val +
+                                                (size_t) j * nb11_val + (size_t) ic0 * nb10_val;
+
+                    if (src1->type == GGML_TYPE_F16) {
+                        half val_h = {};
+                        CUDA_CHECK(cudaMemcpy(&val_h, (const char *)src1_d + byte_offset, sizeof(half), cudaMemcpyDeviceToHost));
+                        const float val_f = __half2float(val_h);
+                        fprintf(stderr, "[MASK_DIAG_SOFTMAX] Coordinate (s=%d, j=%d, ic0=%d): ne13=%lld, nb13=%lld, nb11=%lld, byte_offset=%zu, val=%g\n",
+                                s, j, ic0, (long long)ne13_val, (long long)nb13_val, (long long)nb11_val, byte_offset, (double)val_f);
+                    } else if (src1->type == GGML_TYPE_F32) {
+                        float val_f = {};
+                        CUDA_CHECK(cudaMemcpy(&val_f, (const char *)src1_d + byte_offset, sizeof(float), cudaMemcpyDeviceToHost));
+                        fprintf(stderr, "[MASK_DIAG_SOFTMAX] Coordinate (s=%d, j=%d, ic0=%d): ne13=%lld, nb13=%lld, nb11=%lld, byte_offset=%zu, val=%g\n",
+                                s, j, ic0, (long long)ne13_val, (long long)nb13_val, (long long)nb11_val, byte_offset, (double)val_f);
+                    }
+                }
+            }
+        }
+    }
+#endif
+
     const int64_t nb11 = src1 ? src1->nb[1] : 1;
     const int64_t nb12 = src1 ? src1->nb[2] : 1;
     const int64_t nb13 = src1 ? src1->nb[3] : 1;

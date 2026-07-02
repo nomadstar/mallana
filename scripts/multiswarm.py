@@ -40,6 +40,22 @@ HISTORY_LOG = ".multiswarm_history.log"
 HEARTBEAT_INTERVAL = 30  # seconds of silence before printing a status line
 BUILD_POLL_INTERVAL = 3  # seconds between /proc scans for live build/compile jobs
 
+# This repo is a large llama.cpp fork (tens of thousands of functions). It has a
+# pre-built, indexed code knowledge graph available via the `codebase-memory-mcp`
+# MCP server, which is far cheaper in tokens than raw grep/find for locating code,
+# tracing callers/callees, or understanding structure. Every delegated agent gets
+# reminded of this so none of them burns its budget re-discovering the codebase
+# with brute-force search.
+CODEBASE_MEMORY_HINT = (
+    "NOTE ON SEARCH COST: this repository is a large llama.cpp fork — brute-force grep/find "
+    "across it is expensive. If you have access to the `codebase-memory-mcp` MCP tools "
+    "(search_graph, trace_path, get_code_snippet, search_code, get_architecture, query_graph) "
+    "for the project 'home-ignatus-GitHub-mallana', prefer them over raw grep for locating "
+    "functions, tracing call chains (who calls X / what does X call), and understanding "
+    "structure — they return precise results at a fraction of the token cost. Fall back to "
+    "grep/Read only for text search, configs, or non-code files."
+)
+
 # agy's own `--print` mode has a hardcoded 5-minute default wait (`--print-timeout`,
 # see `agy --help`), independent of anything happening in this script. Any task
 # involving a multi-minute CUDA compile or deep reasoning routinely exceeds that,
@@ -230,6 +246,18 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
                 log_file.write(line)
                 log_file.flush()
 
+    # Final synchronous scan right as the process exits, closing the race window
+    # where a build gets spawned in the last <BUILD_POLL_INTERVAL seconds before
+    # the agent's own process exits: once the parent is gone, any orphaned child
+    # is immediately reparented (to init/subreaper) by the kernel, so walking the
+    # process tree from `process.pid` afterwards would never find it again. The
+    # periodic heartbeat thread alone can miss that window; this catches it.
+    try:
+        roots, _files = _scan_build_state(process.pid)
+        detected_build_roots.update(roots)
+    except Exception:
+        pass
+
     stop_event.set()
     hb.join()
     process.wait()
@@ -284,6 +312,7 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
             f"The codebase is located in the current working directory. You can find key Flash Attention files "
             f"such as 'fattn-vec.cuh' and 'fattn-tile.cuh' in 'ggml/src/ggml-cuda/'. Do NOT run slow global searches "
             f"starting from '/' or '$HOME'. Analyze the codebase and write a precise, step-by-step implementation plan.\n"
+            f"{CODEBASE_MEMORY_HINT}\n"
             f"Your plan MUST begin with YAML frontmatter (delimited by ---) containing:\n"
             f"- task: {task}\n"
             f"- created_at: <current datetime>\n"
@@ -354,6 +383,7 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
 
     prompt = (
         f"You are the IMPLEMENTER ({implementer}). Your task is to execute the implementation plan.\n"
+        f"{CODEBASE_MEMORY_HINT}\n"
         f"Here is the plan:\n"
         f"```markdown\n{plan_content}\n```\n"
     )
@@ -366,7 +396,19 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
     prompt += (
         f"Please perform the required file edits/creations to implement the plan. "
         f"When you are finished, write a short summary of the files modified and changes made "
-        f"to '{SUMMARY_FILE}' (e.g. 'Modified src/main.cpp to support X')."
+        f"to '{SUMMARY_FILE}' (e.g. 'Modified src/main.cpp to support X').\n"
+        f"CRITICAL: This is a single non-interactive turn (headless/print mode) — there is no "
+        f"follow-up turn, scheduled wakeup, or notification that will ever resume you after this "
+        f"response ends. Do NOT background a build/test/long-running command and then end your "
+        f"turn 'waiting' for it to finish — that command will be orphaned and nothing will ever "
+        f"read its result. Run builds, compiles, and validation commands SYNCHRONOUSLY in the "
+        f"foreground (even if a CUDA build takes 5-10 minutes): if your shell/Bash tool accepts an "
+        f"explicit timeout parameter, set it to the maximum allowed (e.g. 600000ms / 10 minutes) "
+        f"for that one call instead of relying on its default (often ~2 minutes, which is shorter "
+        f"than a CUDA rebuild) — do NOT pass any 'run in background' option for it. The call should "
+        f"simply block until the build finishes; that blocking IS the pause, and your turn resumes "
+        f"the instant the command returns, in the same response. Only after that command has "
+        f"actually returned should you write '{SUMMARY_FILE}' and end your turn."
     )
 
     # agy uses --prompt; claude uses --print
@@ -443,6 +485,7 @@ def run_critique(task, iteration, validation_passed, validation_log, model=None,
 
     prompt = (
         f"You are the VERIFIER & CRITIC (OpenCode). A set of changes has been implemented for task: '{task}'.\n"
+        f"{CODEBASE_MEMORY_HINT}\n"
         f"Here is the local validation pass status: {validation_passed}\n"
         f"Here is the local validation log:\n"
         f"```\n{validation_log[:4000]}\n```\n"
@@ -507,6 +550,7 @@ def run_audit(scope=None, model=None, agent=None, skip_permissions=False):
     prompt = (
         f"You are the CODE AUDITOR for the llama-cpp-turboquant research project. "
         f"Your task is to audit: **{scope_desc}**.\n\n"
+        f"{CODEBASE_MEMORY_HINT}\n\n"
         f"Focus areas:\n"
         f"1. **Correctness** — logic bugs, off-by-one errors, undefined behavior, incorrect math\n"
         f"2. **Security** — no hardcoded credentials, no command injection, no unvalidated inputs\n"
@@ -558,12 +602,20 @@ def run_audit(scope=None, model=None, agent=None, skip_permissions=False):
 
 
 def check_success():
-    """Verify if the critique step declared success."""
+    """Verify if the critique step declared success.
+
+    Must be an exact match against the trimmed file content, per the critic
+    prompt's own instruction ("write EXACTLY the word 'SUCCESS' ... and
+    nothing else"). A substring check is unsafe: a critique that legitimately
+    fails can still contain the word "SUCCESS" while explaining why it isn't
+    one yet (e.g. "Do not write SUCCESS until X is fixed"), which would
+    otherwise be misread as approval.
+    """
     if not os.path.exists(CRITIQUE_FILE):
         return False
     with open(CRITIQUE_FILE, "r") as f:
         content = f.read().strip().upper()
-    return "SUCCESS" in content
+    return content == "SUCCESS"
 
 def parse_plan_task():
     """Parse the 'task' field from an existing plan file's YAML frontmatter."""

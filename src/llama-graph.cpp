@@ -1817,6 +1817,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                (int)use_flash_attn, ggml_type_name(k->type), ggml_type_name(v->type), (int)q->ne[1]);
     }
 #endif
+#if defined(TURBO_DIAG_MASK_PAGED)
+    // Log the kq_mask tensor identity/shape as seen at graph-construction time, so it can
+    // be correlated with the backend-side [MASK_DIAG_FA]/[MASK_DIAG_SOFTMAX] dumps for the
+    // same layer/prompt. This confirms whether the -fa on and -fa off paths are handed the
+    // same mask object (same ptr/shape/strides) before any backend-specific addressing.
+    if (kq_mask) {
+        printf("[GRAPH_DIAG_MASK] il=%d use_flash_attn=%d kq_mask_ptr=%p type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]\n",
+               il, (int)use_flash_attn, (void*)kq_mask, ggml_type_name(kq_mask->type),
+               (long long)kq_mask->ne[0], (long long)kq_mask->ne[1], (long long)kq_mask->ne[2], (long long)kq_mask->ne[3],
+               kq_mask->nb[0], kq_mask->nb[1], kq_mask->nb[2], kq_mask->nb[3]);
+    } else {
+        printf("[GRAPH_DIAG_MASK] il=%d use_flash_attn=%d kq_mask_ptr=nullptr\n", il, (int)use_flash_attn);
+    }
+#endif
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
