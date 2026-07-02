@@ -55,7 +55,7 @@ unchanged. TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
 | Quality Gate (automated PPL + speed) | ✅ Operational |
 | Paged Attention (Phase 1) | ✅ Functional |
-| Paged Attention (Phase 2) | 🚧 Implemented — Known n_seq FA bug; workaround: `-fa off` |
+| Paged Attention (Phase 2) | ✅ Fixed 2026-07-02 — native paged FA works with `-fa on`; see `docs/roadmap.md` |
 | TriAttention | 🚧 Implemented — Pending Validation |
 | TriAttention Calibration (M007) | 🔄 H6.1 INDETERMINADO — batch mode prevents eviction; generation-mode eval needed |
 | ROCm / HIP Portability Audit | ✅ Complete — HIP compatibility fixes validated |

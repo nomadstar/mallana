@@ -208,3 +208,22 @@ has not yet been scheduled.
    incorporate upstream fixes and features.
 5. **Expand validation**: Add more model families to the validation suite (Gemma, Mistral,
    DeepSeek).
+
+---
+
+## Known Failures & Pending Technical Debt
+
+### CI/CD Failures
+- **Docker Publish Workflow (`Publish Docker image`)**: The scheduled daily build fails on the ROCm/CUDA caching step (`failed to configure registry cache importer`). This was triggered by the repository rename from `atomicmilkshake/llama-cpp-turboquant` to `nomadstar/mallana`, causing permissions/not found errors for the cached GHCR registry layers under the old org.
+  - *Mitigation*: The workflow utilizes dynamic repository owner variables, so future runs on the new repository owner (`nomadstar`) should auto-correct once clean cache layers are written, but manual cache eviction/invalidation may be needed if GitHub Actions continues referencing stale repository cache scopes.
+
+### Codebase TODOs & Key Technical Debt
+A scan of the implementation paths reveals the following high-priority pending items and assertions:
+1. **Flash Attention (CUDA)**:
+   - **Vector FA Kernel Optimization**: Replace heavy preprocessor macros with C++ templates, and switch to FP32 accumulate for BF16 validation in [fattn-common.cuh](file:///home/ignatus/GitHub/mallana/ggml/src/ggml-cuda/fattn-common.cuh#L135).
+   - **Architectural Tuning**: Optimize TILE and MMA kernel parameters specifically for RDNA and legacy NVIDIA GPUs (e.g., Pascal P100) in [fattn-tile.cuh](file:///home/ignatus/GitHub/mallana/ggml/src/ggml-cuda/fattn-tile.cuh#L8-L9) and [fattn-mma-f16.cuh](file:///home/ignatus/GitHub/mallana/ggml/src/ggml-cuda/fattn-mma-f16.cuh#L112).
+2. **KV Cache & Graph Wiring**:
+   - **Multiple Streams**: Hard assertions block multi-stream execution and non-sequential batching: `GGML_ASSERT(n_stream == 1 && "TODO: support multiple streams")` in [llama-kv-cache.cpp](file:///home/ignatus/GitHub/mallana/src/llama-kv-cache.cpp#L2027) and `GGML_ASSERT(!ubatch->equal_seqs())` in [llama-graph.cpp](file:///home/ignatus/GitHub/mallana/src/llama-graph.cpp#L134).
+   - **Unified Cache Assertions**: Several validations for input attention indices (`self_v_idxs->ne[0] == params.ubatch.n_tokens`) are currently commented out in [llama-graph.cpp](file:///home/ignatus/GitHub/mallana/src/llama-graph.cpp#L446) and need to be moved to the unified cache.
+3. **Paging & Verification Gaps**:
+   - **Byte-level V-pool comparison**: The validation harness to compare the exact layout of the paged V pool (`-fa on`) vs the gather V pool (`-fa off`) byte-by-byte for `sequence >= 1` was bypassed in favor of end-to-end perplexity (PPL) verification. This remains a validation gap.
