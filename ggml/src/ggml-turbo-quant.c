@@ -15,6 +15,11 @@
 #include <assert.h>
 #include <stdlib.h>
 
+/* MSVC's <math.h> only defines M_PI with _USE_MATH_DEFINES */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /* Global: WHT group size for CPU quantize path (set by CPU SET_ROWS handler) */
 int turbo3_cpu_wht_group_size = 0;
 

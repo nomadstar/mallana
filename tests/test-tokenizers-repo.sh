@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 
 if [ $# -lt 2 ]; then
-    printf "Usage: $0 <git-repo> <target-folder> [<test-exe>]\n"
+    printf "Usage: $0 <git-repo> <target-folder> [<test-exe>] [<revision>]\n"
     exit 1
 fi
 
-if [ $# -eq 3 ]; then
+if [ $# -ge 3 ]; then
     toktest=$3
 else
     toktest="./test-tokenizer-0"
 fi
+
+# optional revision to pin the vocab repo to (newer vocabs may need newer llama.cpp)
+revision=${4:-}
 
 if [ ! -x $toktest ]; then
     printf "Test executable \"$toktest\" not found!\n"
@@ -20,9 +23,16 @@ repo=$1
 folder=$2
 
 if [ -d $folder ] && [ -d $folder/.git ]; then
-    (cd $folder; git pull)
+    if [ -n "$revision" ]; then
+        (cd $folder; git fetch --quiet origin; git checkout --quiet --force $revision)
+    else
+        (cd $folder; git pull)
+    fi
 else
     git clone $repo $folder
+    if [ -n "$revision" ]; then
+        (cd $folder; git checkout --quiet --force $revision)
+    fi
 
     # byteswap models if on big endian
     if [ "$(uname -m)" = s390x ]; then

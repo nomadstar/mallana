@@ -23,12 +23,10 @@
 #endif
 
 #ifdef GGML_USE_CUDA
-extern bool  g_innerq_finalized;
 extern float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS];
 extern bool turbo_innerq_needs_tensor_update(void);
 extern void turbo_innerq_mark_tensor_updated(void);
 #else
-static bool  g_innerq_finalized = false;
 static float g_innerq_scale_inv_host[INNERQ_MAX_CHANNELS] = {};
 static bool turbo_innerq_needs_tensor_update(void) { return false; }
 static void turbo_innerq_mark_tensor_updated(void) {}
@@ -377,7 +375,25 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 
     // Initialize PagedAttention block pool (FA path only — SDPA/v_trans uses legacy addressing)
-    pg_enabled = !v_trans && (getenv("LLAMA_NO_PAGING") == nullptr);
+    // Paged addressing is experimental: only the CUDA FA kernel (fattn-vec.cuh) understands
+    // the page table — other backends' FLASH_ATTN_EXT reads the paged V pool as linear
+    // memory and produces garbage — and even on CUDA several architectures show large
+    // numeric divergence vs. the CPU reference (see test-llama-archs). Off by default;
+    // opt in with LLAMA_PAGING=1 when the KV cache lives entirely on CUDA devices.
+    bool pg_supported = !v_trans;
+    for (const auto & [ctx, buf] : ctxs_bufs) {
+        ggml_backend_dev_t dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(buf.get()));
+        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+        if (reg == nullptr || strcmp(ggml_backend_reg_name(reg), "CUDA") != 0) {
+            pg_supported = false;
+            break;
+        }
+    }
+    const char * pg_env = getenv("LLAMA_PAGING");
+    pg_enabled = pg_supported && pg_env != nullptr && atoi(pg_env) != 0;
+    if (pg_env != nullptr && atoi(pg_env) != 0 && !pg_supported) {
+        LLAMA_LOG_WARN("%s: LLAMA_PAGING requested but the KV cache is not fully on CUDA devices - paged attention disabled\n", __func__);
+    }
     if (pg_enabled) {
         const uint32_t n_pages_per_stream = (kv_size + pg_block_size - 1) / pg_block_size;
         // V tensor has (kv_size + pg_block_size) rows per stream = (n_pages_per_stream + 1)
@@ -2345,8 +2361,6 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
     // Iterate and write all the keys first, each row is a cell
     // Get whole range at a time
     for (const auto & layer : layers) {
-        const uint32_t il = layer.il;
-
         auto * k = layer.k_stream[cr.strm];
 
         // Use actual tensor width (may be padded for turbo types: e.g. 576→640)
@@ -2370,8 +2384,6 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
 
     if (!v_trans) {
         for (const auto & layer : layers) {
-            const uint32_t il = layer.il;
-
             auto * v = layer.v_stream[cr.strm];
             if (!v) {
                 continue;

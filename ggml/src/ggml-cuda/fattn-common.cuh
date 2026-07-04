@@ -6,7 +6,6 @@
 #include "turbo-quant.cuh"
 
 #include <cstdint>
-#include <cuda_fp16.h>
 
 #define FATTN_KQ_STRIDE       256
 #define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.

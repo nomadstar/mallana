@@ -138,7 +138,8 @@ if (NOT WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/test-tokenizers-repo.sh
         NAME test-tokenizers-ggml-vocabs
         WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-        ARGS https://huggingface.co/ggml-org/vocabs ${PROJECT_SOURCE_DIR}/models/ggml-vocabs
+        # pinned: newer vocabs (e.g. HybridDNA) require a newer llama.cpp base than this fork
+        ARGS https://huggingface.co/ggml-org/vocabs ${PROJECT_SOURCE_DIR}/models/ggml-vocabs ./test-tokenizer-0 a40cfbe46292685ea4581906985b457e4c3f002a
     )
 endif()
 

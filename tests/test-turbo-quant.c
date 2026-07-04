@@ -49,33 +49,33 @@ int main(void) {
     quantize_row_turbo3_0_ref(input, buf, d);
     dequantize_row_turbo3_0(buf, output, d);
     printf("Test 1 (turbo3): e0 = [1, 0, ...]\n");
-    printf("  In:  [%.6f, %.6f, %.6f, %.6f]\n", input[0], input[1], input[2], input[3]);
-    printf("  Out: [%.6f, %.6f, %.6f, %.6f]\n", output[0], output[1], output[2], output[3]);
+    printf("  In:  [%.6f, %.6f, %.6f, %.6f]\n", (double)input[0], (double)input[1], (double)input[2], (double)input[3]);
+    printf("  Out: [%.6f, %.6f, %.6f, %.6f]\n", (double)output[0], (double)output[1], (double)output[2], (double)output[3]);
     mse = cosv = ni = no = 0;
     for (int i = 0; i < d; i++) { mse += (input[i]-output[i])*(input[i]-output[i]); cosv += input[i]*output[i]; ni += input[i]*input[i]; no += output[i]*output[i]; }
-    printf("  MSE=%.8f Cosine=%.6f OutNorm=%.6f\n\n", mse/d, ni > 0 && no > 0 ? cosv/sqrtf(ni)/sqrtf(no) : 0, sqrtf(no));
+    printf("  MSE=%.8f Cosine=%.6f OutNorm=%.6f\n\n", (double)(mse/d), ni > 0 && no > 0 ? (double)(cosv/sqrtf(ni)/sqrtf(no)) : 0.0, (double)sqrtf(no));
 
     /* Test 2: large-norm vector */
     for (int i = 0; i < d; i++) input[i] = sinf(i*0.1f+0.5f) * 10.0f;
     quantize_row_turbo3_0_ref(input, buf, d);
     dequantize_row_turbo3_0(buf, output, d);
     printf("Test 2 (turbo3): sin*10\n");
-    printf("  In:  [%.4f, %.4f, %.4f, %.4f]\n", input[0], input[1], input[2], input[3]);
-    printf("  Out: [%.4f, %.4f, %.4f, %.4f]\n", output[0], output[1], output[2], output[3]);
+    printf("  In:  [%.4f, %.4f, %.4f, %.4f]\n", (double)input[0], (double)input[1], (double)input[2], (double)input[3]);
+    printf("  Out: [%.4f, %.4f, %.4f, %.4f]\n", (double)output[0], (double)output[1], (double)output[2], (double)output[3]);
     mse = cosv = ni = no = 0;
     for (int i = 0; i < d; i++) { mse += (input[i]-output[i])*(input[i]-output[i]); cosv += input[i]*output[i]; ni += input[i]*input[i]; no += output[i]*output[i]; }
-    printf("  MSE=%.8f Cosine=%.6f InNorm=%.2f OutNorm=%.2f\n\n", mse/d, cosv/sqrtf(ni)/sqrtf(no), sqrtf(ni), sqrtf(no));
+    printf("  MSE=%.8f Cosine=%.6f InNorm=%.2f OutNorm=%.2f\n\n", (double)(mse/d), (double)(cosv/sqrtf(ni)/sqrtf(no)), (double)sqrtf(ni), (double)sqrtf(no));
 
     /* Test 3: turbo4 */
     for (int i = 0; i < d; i++) input[i] = cosf(i*0.2f) * 5.0f;
     quantize_row_turbo4_0_ref(input, buf, d);
     dequantize_row_turbo4_0(buf, output, d);
     printf("Test 3 (turbo4): cos*5\n");
-    printf("  In:  [%.4f, %.4f, %.4f, %.4f]\n", input[0], input[1], input[2], input[3]);
-    printf("  Out: [%.4f, %.4f, %.4f, %.4f]\n", output[0], output[1], output[2], output[3]);
+    printf("  In:  [%.4f, %.4f, %.4f, %.4f]\n", (double)input[0], (double)input[1], (double)input[2], (double)input[3]);
+    printf("  Out: [%.4f, %.4f, %.4f, %.4f]\n", (double)output[0], (double)output[1], (double)output[2], (double)output[3]);
     mse = cosv = ni = no = 0;
     for (int i = 0; i < d; i++) { mse += (input[i]-output[i])*(input[i]-output[i]); cosv += input[i]*output[i]; ni += input[i]*input[i]; no += output[i]*output[i]; }
-    printf("  MSE=%.8f Cosine=%.6f\n\n", mse/d, cosv/sqrtf(ni)/sqrtf(no));
+    printf("  MSE=%.8f Cosine=%.6f\n\n", (double)(mse/d), (double)(cosv/sqrtf(ni)/sqrtf(no)));
 
     printf("=== Extreme-Input Test Cases (Robustness) ===\n\n");
 
