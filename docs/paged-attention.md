@@ -41,7 +41,8 @@ contiguous buffer before Flash Attention executes.
 - Page table indirection for V reads.
 - Lazy allocation on first write.
 - CPU fallback for `GATHER_PAGED_V`.
-- `LLAMA_NO_PAGING` env var to disable.
+- Opt-in via `LLAMA_PAGING=1` (off by default since 2026-07-03; formerly opt-out via
+  `LLAMA_NO_PAGING`).
 
 ### Phase 2 — Native Paged FA (Implemented)
 
@@ -235,9 +236,9 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 | Parameter | Value | Description |
 |---|---|---|
 | Page block size | 32 tokens | Aligned to `QK_TURBO3` |
-| Auto-enable | When `v_trans == false` (FA path) | Also requires `LLAMA_NO_PAGING` not set |
-| TriAttention page budget | `--triattention-page-budget N` | `0` disables eviction; `N > 0` enables physical-page eviction |
-| Disable | `LLAMA_NO_PAGING=1` | Reverts to legacy contiguous layout |
+| Default | **Disabled** (since 2026-07-03) | Legacy contiguous layout unless explicitly opted in |
+| Enable | `LLAMA_PAGING=1` | Requires `v_trans == false` (FA path) **and** the KV cache fully resident on CUDA devices; otherwise a warning is logged and paging stays off |
+| TriAttention page budget | `--triattention-page-budget N` | `0` disables eviction; `N > 0` enables physical-page eviction (requires paging enabled) |
 
 ---
 

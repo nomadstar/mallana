@@ -26,12 +26,17 @@
 | multiswarm.py: live build/compile progress from `/proc`, pause-until-build-done, agy `--print-timeout` fix | ✅ |
 | Test-suite migration & CI integration — migrated 4 upstream tests (`test-save-load-state`, `test-recurrent-state-rollback`, `test-quant-type-selection`, `test-col2im-1d`), fixed the paged-FA graph-wiring abort on non-FA attention paths (T5 cross-attention), and wired `ctest -L main` into `scripts/validate.sh` | ✅ |
 | **Paged Attention Phase 2 — fixed.** Two independent bugs, both required for correct PPL: (1) tensor-core FA kernels silently ignored the page table (dispatch/addressing bug — fixed by routing to VEC/TILE when paging is active), and (2) a missing unconditional scheduler synchronization in `llama_context::process_ubatch` let a still-in-flight kernel read a torn page table. See below and `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-02 update). | ✅ |
+| CI restored & green-path fixes (2026-07-03) — workflows re-registered after the repo rename (push touching `.github/workflows` required), new lean `fork-tests.yml` (CPU build + `ctest -L main` on every push/PR), and fixes for every compile failure in the hosted matrix: `GGML_OP_COUNT` static_assert → 99 in `ggml-rpc.h` (`RPC_PROTO_PATCH_VERSION` → 3), MSVC `M_PI` fallback in `ggml-turbo-quant.c`, unused-variable removals for `LLAMA_FATAL_WARNINGS=ON` (`llama-kv-cache.cpp`, `set-rows.cu`), C++20 enum-arithmetic casts (`test-backend-ops.cpp`, `clip-graph.h`), MUSA `cudaMemcpyTo/FromSymbol` mappings, `ggml-org/vocabs` test repo pinned to `a40cfbe` | ✅ |
+| **PagedAttention flipped to opt-in (`LLAMA_PAGING=1`, 2026-07-03).** Default-on paging corrupted all CPU inference (only the CUDA FA kernel understands the page table; CPU `FLASH_ATTN_EXT` read the paged V pool as linear memory — root cause of the deterministic-gibberish `test_load_split_model` failures in the Server workflows) and produced per-arch CUDA divergences (the former `test-llama-archs` P1: qwen, glm4, olmo, gemma3n NMSE 0.47, etc.). Paging now requires `LLAMA_PAGING=1` **and** a KV cache fully resident on CUDA devices (warns and disables otherwise). With paging off by default, `test-llama-archs` passes on CUDA (11 failures → 0) and the full ctest suite is 56/56 | ✅ |
+| multiswarm.py: `--ci-status` / `--ci-fix` modes — query GitHub Actions runs via `gh`, download failed-step logs, and auto-compose a swarm task to fix them (no auto-push; owner reviews) | ✅ |
 
 ### Upcoming
 
 | Milestone | Priority |
 |---|---|
-| Fix `test-llama-archs` CUDA numerical divergences (qwen 2.7e-02, phi2, glm4 1.4e-01, olmo 6.4e-01, etc.) | P1 |
+| Re-enable PagedAttention by default: fix the remaining CUDA per-arch divergences under `LLAMA_PAGING=1` (gemma3n NMSE 0.47, qwen, glm4, olmo, etc.), then flip the default back once `test-llama-archs` passes with paging on | P1 |
+| Apply the sched-reset audit High finding: K-shift context-shift path launches async compute, then `llama_context::memory_update()` → `graph_reserve()` calls `ggml_backend_sched_reset()` (llama-context.cpp:2104) without a prior synchronize — add sync after `mctx->apply()` (see `.multiswarm_audit.md`) | P1 |
+| ROCm/HIP validation of the test suite + paged FA on a 16 GB RDNA GPU (self-hosted runner candidate; hosted runners are CPU-only) | P2 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |
@@ -128,7 +133,7 @@ on a validated foundation.
 | Implement CUDA gather kernel | P1 | ✅ |
 | Wire gather into compute graph | P1 | ✅ |
 | CPU fallback for gather | P1 | ✅ |
-| `LLAMA_NO_PAGING` env var gate | P1 | ✅ |
+| Paging env var gate — now **opt-in** `LLAMA_PAGING=1` (2026-07-03; replaced the opt-out `LLAMA_NO_PAGING`) | P1 | ✅ |
 | Fix device sync race in paged KV write | P1 | ✅ |
 | Fix K-cache isolation (flat pool indices) | P1 | ✅ |
 | Phase 2: Native paged FA — **fixed 2026-07-02, two independent bugs, both required for correct PPL:** (1) **kernel dispatch/addressing** — tensor-core FA kernels (MMA_F16/WMMA_F16) received the page table but silently ignored it (`GGML_UNUSED(v_ptable)`), reading unpaged addresses against a pool with no valid per-sequence stride when paged; fixed by routing to the VEC/TILE kernels (the only ones implementing `v_paged_ptr`) whenever a page table is attached (`fattn.cu`). (2) **missing scheduler synchronization** — `llama_context::process_ubatch` (`src/llama-context.cpp`) only called `ggml_backend_sched_synchronize()` before graph reuse when `cparams.pipeline_parallel` was set, on the incorrect assumption that async in-flight compute across ubatches only happens with pipeline parallelism; `ggml_backend_sched_graph_compute_async` is always asynchronous (single-GPU included), so a still-running previous-ubatch FA kernel could read a torn/stale page table — uniquely exposed by paging because, unlike K/V cache cells (append-only, non-overlapping), the page table is fully overwritten at the same address every ubatch. Fixed by making the sync unconditional. Also added a defensive `k_abs < k_max` bounds guard in `v_paged_ptr` (`fattn-common.cuh`) for the tail-tile case, uncovered once (1) and (2) were fixed. **Evidence:** PPL now correct (~9.7-12.3, matching baseline) under normal (non-blocking) execution for both VEC and TILE kernels, with and without CUDA graphs; `compute-sanitizer --tool memcheck` reports 0 errors; PPL reproduced 3× for VEC. **Known gap:** the byte-level V comparison between paged `-fa on` and gather `-fa off` at `sequence≥1` (requested explicitly in the 2026-07-02 debugging round) was not performed — the PPL-match evidence above was used instead; if a byte-level comparison harness gets built later, running it here would close that gap. See `research/milestone-008/phase2-fa-debug-handoff.md` (2026-07-02 update) for the full diagnostic trail. | P1 | ✅ |
@@ -195,13 +200,15 @@ has not yet been scheduled.
 
 ## Immediate Next Steps
 
-1. **[P1] Audit other `ggml_backend_sched_reset`/graph-rebuild call sites for the same
-   missing-synchronization pattern.** The fix in `llama_context::process_ubatch` covers the
-   ubatch decode path; confirm there isn't an equivalent gap in other places that call
-   `ggml_backend_sched_reset` + `ggml_backend_sched_alloc_graph` back-to-back without a prior
-   `ggml_backend_sched_synchronize` (e.g. state save/restore, batch re-decode after a
-   context-shift). Low urgency since those paths don't share the paged-attention full-overwrite
-   pattern, but worth a pass.
+1. **[P1] ~~Audit other `ggml_backend_sched_reset`/graph-rebuild call sites~~ — audit
+   completed 2026-07-03** (`multiswarm.py --audit`, report in `.multiswarm_audit.md`).
+   Result: the `process_ubatch` fix is correct; paged state save/restore safely rejects
+   `pg_enabled`. **One High finding remains unfixed**: the K-shift context-shift path —
+   `llama_kv_cache::update()` launches the K-shift via async `graph_compute()`, then
+   `llama_context::memory_update()` calls `graph_reserve()`, whose first action is
+   `ggml_backend_sched_reset()` (llama-context.cpp:2104) with no synchronize in between.
+   Fix (pending, tracked in Upcoming): sync after `mctx->apply()` in `memory_update()`,
+   or a defensive sync at the top of `graph_reserve()`.
 2. **H6.1 generation-mode evaluation**: `scripts/triattention_generation_eval.py` is written
    and unblocked now that Phase 2 paged FA is fixed — run it.
 3. **Large-scale benchmarks**: Systematic benchmark harness across multiple GPUs, model
@@ -227,13 +234,13 @@ A scan of the implementation paths reveals the following high-priority pending i
 2. **KV Cache & Graph Wiring**:
    - **Multiple Streams**: Hard assertions block multi-stream execution and non-sequential batching: `GGML_ASSERT(n_stream == 1 && "TODO: support multiple streams")` in [llama-kv-cache.cpp](file:///home/ignatus/GitHub/mallana/src/llama-kv-cache.cpp#L2027) and `GGML_ASSERT(!ubatch->equal_seqs())` in [llama-graph.cpp](file:///home/ignatus/GitHub/mallana/src/llama-graph.cpp#L134).
    - **Unified Cache Assertions**: Several validations for input attention indices (`self_v_idxs->ne[0] == params.ubatch.n_tokens`) are currently commented out in [llama-graph.cpp](file:///home/ignatus/GitHub/mallana/src/llama-graph.cpp#L446) and need to be moved to the unified cache.
-3. **CUDA Numerical Divergences in `test-llama-archs` (P1)**:
-   - When run on the CUDA backend, `test-llama-archs` reports logit divergences vs the CPU
-     reference for several architectures (qwen 2.7e-02, glm4 1.4e-01, olmo 6.4e-01, phi2, etc.).
-     These are pre-existing numerical issues unrelated to the paged-attention graph wiring
-     (the wiring abort on non-FA attention paths was fixed separately in `src/llama-graph.cpp`).
-   - Until these divergences are resolved, `scripts/validate.sh` excludes the test from the
-     ctest run via `-E 'test-llama-archs'`. Remove the exclusion once the divergences are fixed.
+3. **CUDA Numerical Divergences in `test-llama-archs` (P1) — root-caused 2026-07-03**:
+   - The divergences (qwen 2.7e-02, glm4 1.4e-01, olmo 6.4e-01, phi2, gemma3n NMSE 0.47, etc.)
+     were caused by default-on PagedAttention, not by TurboQuant or the graph wiring. With
+     paging now opt-in (`LLAMA_PAGING=1`), the test passes on CUDA and the `validate.sh`
+     exclusion has been removed.
+   - The divergences still reproduce **with `LLAMA_PAGING=1`** — fixing them is the
+     prerequisite for re-enabling paging by default (tracked as P1 in Upcoming).
 4. **Paging & Verification Gaps**:
    - **Byte-level V-pool comparison**: The validation harness to compare the exact layout of the paged V pool (`-fa on`) vs the gather V pool (`-fa off`) byte-by-byte for `sequence >= 1` was bypassed in favor of end-to-end perplexity (PPL) verification. This remains a validation gap.
    - **Unconditional Synchronization Performance Debt**: The `ggml_backend_sched_synchronize()` call added in `llama_context::process_ubatch()` prevents the page table race condition but is unconditional, which halts async overlap across micro-batches (especially on single-GPU setups). It should eventually be replaced by a conditional synchronization (only when mutable page tables/host buffers are shared) or by double-buffering the page tables.
