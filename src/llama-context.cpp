@@ -745,6 +745,11 @@ bool llama_context::memory_update(bool optimize) {
         }
     }
 
+    // mctx->apply() may launch async compute (e.g. the K-shift graph) - it must complete
+    // before graph_reserve() calls ggml_backend_sched_reset(), otherwise the scheduler
+    // state could be torn down while the kernels are still in flight
+    synchronize();
+
     // if the memory module did any computation, we have to reserve a new worst-case graph
     {
         const auto mctx = memory->init_full();

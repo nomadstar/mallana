@@ -474,10 +474,18 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
     mctx->get_base()->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->get_base()->set_input_v_idxs(self_v_idxs, ubatch);
 
+    if (self_v_page_table) {
+        mctx->get_base()->set_input_v_page_table(self_v_page_table, ubatch);
+    }
+
     mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
 
     mctx->get_swa()->set_input_k_idxs(self_k_idxs_swa, ubatch);
     mctx->get_swa()->set_input_v_idxs(self_v_idxs_swa, ubatch);
+
+    if (self_v_page_table_swa) {
+        mctx->get_swa()->set_input_v_page_table(self_v_page_table_swa, ubatch);
+    }
 
     mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
 }
@@ -533,6 +541,10 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
 void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
+
+    if (inp_attn->self_v_page_table) {
+        mctx->get_attn()->set_input_v_page_table(inp_attn->self_v_page_table, ubatch);
+    }
 
     mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
 
@@ -623,6 +635,10 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
         attn_ctx->get_base()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
         attn_ctx->get_base()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
+        if (inp_attn->self_v_page_table) {
+            attn_ctx->get_base()->set_input_v_page_table(inp_attn->self_v_page_table, ubatch);
+        }
+
         attn_ctx->get_base()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
     }
 
@@ -630,6 +646,10 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
     if (inp_attn->self_k_idxs_swa && inp_attn->self_k_idxs_swa->buffer) {
         attn_ctx->get_swa()->set_input_k_idxs(inp_attn->self_k_idxs_swa, ubatch);
         attn_ctx->get_swa()->set_input_v_idxs(inp_attn->self_v_idxs_swa, ubatch);
+
+        if (inp_attn->self_v_page_table_swa) {
+            attn_ctx->get_swa()->set_input_v_page_table(inp_attn->self_v_page_table_swa, ubatch);
+        }
 
         attn_ctx->get_swa()->set_input_kq_mask(inp_attn->self_kq_mask_swa, ubatch, cparams.causal_attn);
     }
@@ -2419,7 +2439,44 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    ggml_tensor * v;
+
+    ggml_tensor * v_ptable = is_swa ? inp->self_v_page_table_swa : inp->self_v_page_table;
+    if (v_ptable) {
+        ggml_tensor * v_pool = mctx_cur->get_v_paged(ctx0, il);
+
+        const int32_t n_kv_val = (int32_t) mctx_cur->get_n_kv();
+        int32_t bs;
+        int32_t ns_phys;  // physical stream count (pool rows), distinct from n_seq (page-table rows)
+        memcpy(&bs,      v_ptable->op_params,     sizeof(int32_t));
+        memcpy(&ns_phys, v_ptable->op_params + 1, sizeof(int32_t));
+
+        const int64_t n_embd_v   = v_pool->ne[0];
+        const int64_t n_head_kv  = (int64_t) hparams.n_head_kv(il);
+        const int64_t head_v_eff = n_embd_v / n_head_kv;
+
+        if (cparams.flash_attn && kq_b == nullptr) {
+            // native paged FA — pass pool + page table directly to the kernel
+            // (see the non-ISWA build_attn above for the stride derivation)
+            v = ggml_view_4d(ctx0, v_pool,
+                    head_v_eff, n_head_kv, n_kv_val, (int64_t) ns_phys,
+                    ggml_row_size(v_pool->type, head_v_eff),
+                    ggml_row_size(v_pool->type, n_embd_v),
+                    ggml_row_size(v_pool->type, n_embd_v) * (int64_t) n_kv_val,
+                    0);
+        } else {
+            // non-FA fallback: materialise V contiguously via gather
+            v = ggml_gather_paged_v(ctx0, v_pool, v_ptable, n_kv_val, bs);
+            v = ggml_view_4d(ctx0, v,
+                    head_v_eff, n_head_kv, n_kv_val, (int64_t) ns_phys,
+                    ggml_row_size(v->type, head_v_eff),
+                    ggml_row_size(v->type, n_embd_v),
+                    ggml_row_size(v->type, n_embd_v * n_kv_val),
+                    0);
+        }
+    } else {
+        v = mctx_cur->get_v(ctx0, il);
+    }
 
     // TurboQuant: pre-rotate Q for ISWA attention (pad to 128-aligned if needed)
     if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0) {
@@ -2432,6 +2489,14 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    if (v_ptable && cparams.flash_attn && kq_b == nullptr) {
+        ggml_tensor * fa_tensor = find_flash_attn_ext(cur);
+        if (fa_tensor) {
+            ggml_flash_attn_ext_set_page_table(fa_tensor, v_ptable);
+        } else {
+            GGML_ABORT("Failed to locate GGML_OP_FLASH_ATTN_EXT tensor in attention output DAG");
+        }
+    }
     cb(cur, "kqv_out", il);
 
     // TurboQuant: if V was padded, extract original V head_dim after inverse WHT
@@ -2531,6 +2596,10 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
         inp->self_k_idxs = mctx_cur->get_base()->build_input_k_idxs(ctx0, ubatch);
         inp->self_v_idxs = mctx_cur->get_base()->build_input_v_idxs(ctx0, ubatch);
 
+        if (mctx_cur->get_base()->is_paged()) {
+            inp->self_v_page_table = mctx_cur->get_base()->build_input_v_page_table(ctx0, (uint32_t) ubatch.n_seqs);
+        }
+
         inp->self_kq_mask = build_kq_mask(ctx0, mctx_cur->get_base(), ubatch, cparams);
         ggml_set_input(inp->self_kq_mask);
         ggml_set_name(inp->self_kq_mask, "self_kq_mask");
@@ -2544,6 +2613,10 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
 
         inp->self_k_idxs_swa = mctx_cur->get_swa()->build_input_k_idxs(ctx0, ubatch);
         inp->self_v_idxs_swa = mctx_cur->get_swa()->build_input_v_idxs(ctx0, ubatch);
+
+        if (mctx_cur->get_swa()->is_paged()) {
+            inp->self_v_page_table_swa = mctx_cur->get_swa()->build_input_v_page_table(ctx0, (uint32_t) ubatch.n_seqs);
+        }
 
         inp->self_kq_mask_swa = build_kq_mask(ctx0, mctx_cur->get_swa(), ubatch, cparams);
         ggml_set_input(inp->self_kq_mask_swa);
@@ -2711,6 +2784,10 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
         inp_attn->self_k_idxs = attn_ctx->get_base()->build_input_k_idxs(ctx0, ubatch);
         inp_attn->self_v_idxs = attn_ctx->get_base()->build_input_v_idxs(ctx0, ubatch);
 
+        if (attn_ctx->get_base()->is_paged()) {
+            inp_attn->self_v_page_table = attn_ctx->get_base()->build_input_v_page_table(ctx0, (uint32_t) ubatch.n_seqs);
+        }
+
         inp_attn->self_kq_mask = build_kq_mask(ctx0, attn_ctx->get_base(), ubatch, cparams);
         ggml_set_input(inp_attn->self_kq_mask);
 
@@ -2720,6 +2797,10 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
     {
         inp_attn->self_k_idxs_swa = attn_ctx->get_swa()->build_input_k_idxs(ctx0, ubatch);
         inp_attn->self_v_idxs_swa = attn_ctx->get_swa()->build_input_v_idxs(ctx0, ubatch);
+
+        if (attn_ctx->get_swa()->is_paged()) {
+            inp_attn->self_v_page_table_swa = attn_ctx->get_swa()->build_input_v_page_table(ctx0, (uint32_t) ubatch.n_seqs);
+        }
 
         inp_attn->self_kq_mask_swa = build_kq_mask(ctx0, attn_ctx->get_swa(), ubatch, cparams);
         ggml_set_input(inp_attn->self_kq_mask_swa);

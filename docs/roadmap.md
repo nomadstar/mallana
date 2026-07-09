@@ -29,13 +29,14 @@
 | CI restored & green-path fixes (2026-07-03) — workflows re-registered after the repo rename (push touching `.github/workflows` required), new lean `fork-tests.yml` (CPU build + `ctest -L main` on every push/PR), and fixes for every compile failure in the hosted matrix: `GGML_OP_COUNT` static_assert → 99 in `ggml-rpc.h` (`RPC_PROTO_PATCH_VERSION` → 3), MSVC `M_PI` fallback in `ggml-turbo-quant.c`, unused-variable removals for `LLAMA_FATAL_WARNINGS=ON` (`llama-kv-cache.cpp`, `set-rows.cu`), C++20 enum-arithmetic casts (`test-backend-ops.cpp`, `clip-graph.h`), MUSA `cudaMemcpyTo/FromSymbol` mappings, `ggml-org/vocabs` test repo pinned to `a40cfbe` | ✅ |
 | **PagedAttention flipped to opt-in (`LLAMA_PAGING=1`, 2026-07-03).** Default-on paging corrupted all CPU inference (only the CUDA FA kernel understands the page table; CPU `FLASH_ATTN_EXT` read the paged V pool as linear memory — root cause of the deterministic-gibberish `test_load_split_model` failures in the Server workflows) and produced per-arch CUDA divergences (the former `test-llama-archs` P1: qwen, glm4, olmo, gemma3n NMSE 0.47, etc.). Paging now requires `LLAMA_PAGING=1` **and** a KV cache fully resident on CUDA devices (warns and disables otherwise). With paging off by default, `test-llama-archs` passes on CUDA (11 failures → 0) and the full ctest suite is 56/56 | ✅ |
 | multiswarm.py: `--ci-status` / `--ci-fix` modes — query GitHub Actions runs via `gh`, download failed-step logs, and auto-compose a swarm task to fix them (no auto-push; owner reviews) | ✅ |
+| Sched-reset audit High finding fixed: added missing scheduler synchronization after `mctx->apply()` in `llama_context::memory_update()` so the async K-shift graph completes before `graph_reserve()` resets the scheduler | ✅ |
+| **Paged per-arch divergences fixed (2026-07-09).** All `LLAMA_PAGING=1` `test-llama-archs` failures (plamo2/3, gemma3n NMSE 0.85, olmo2, nemotron_h(+moe), granitehybrid, gpt-oss) had one root cause: the ISWA (`llm_graph_input_attn_kv_iswa`) and hybrid (`llm_graph_input_mem_hybrid*`) input paths never wired the V page table — the ISWA `build_attn` read the paged V pool as linear memory via `get_v`, and the hybrid `set_input`s never uploaded the page table. Fixed in `src/llama-graph.{h,cpp}` by mirroring the standard-KV paged wiring (build/set page tables for base+SWA caches, paged V view / gather fallback, `ggml_flash_attn_ext_set_page_table`). `LLAMA_PAGING=1 test-llama-archs` now 0 failures (was 8); paging-off suite unchanged (44/44). Default flip is a separate owner decision (P1 below). | ✅ |
 
 ### Upcoming
 
 | Milestone | Priority |
 |---|---|
-| Re-enable PagedAttention by default: fix the remaining CUDA per-arch divergences under `LLAMA_PAGING=1` (gemma3n NMSE 0.47, qwen, glm4, olmo, etc.), then flip the default back once `test-llama-archs` passes with paging on | P1 |
-| Apply the sched-reset audit High finding: K-shift context-shift path launches async compute, then `llama_context::memory_update()` → `graph_reserve()` calls `ggml_backend_sched_reset()` (llama-context.cpp:2104) without a prior synchronize — add sync after `mctx->apply()` (see `.multiswarm_audit.md`) | P1 |
+| Re-enable PagedAttention by default: the per-arch CUDA divergences under `LLAMA_PAGING=1` are now fixed (ISWA/hybrid page-table wiring, 2026-07-09; `test-llama-archs` passes with paging on) — remaining step is the owner decision to flip the default | P1 |
 | ROCm/HIP validation of the test suite + paged FA on a 16 GB RDNA GPU (self-hosted runner candidate; hosted runners are CPU-only) | P2 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
@@ -203,12 +204,10 @@ has not yet been scheduled.
 1. **[P1] ~~Audit other `ggml_backend_sched_reset`/graph-rebuild call sites~~ — audit
    completed 2026-07-03** (`multiswarm.py --audit`, report in `.multiswarm_audit.md`).
    Result: the `process_ubatch` fix is correct; paged state save/restore safely rejects
-   `pg_enabled`. **One High finding remains unfixed**: the K-shift context-shift path —
-   `llama_kv_cache::update()` launches the K-shift via async `graph_compute()`, then
-   `llama_context::memory_update()` calls `graph_reserve()`, whose first action is
-   `ggml_backend_sched_reset()` (llama-context.cpp:2104) with no synchronize in between.
-   Fix (pending, tracked in Upcoming): sync after `mctx->apply()` in `memory_update()`,
-   or a defensive sync at the top of `graph_reserve()`.
+   `pg_enabled`. **High finding fixed**: the K-shift context-shift path now calls
+   `synchronize()` after `mctx->apply()` in `llama_context::memory_update()`, so the async
+   K-shift graph completes before `graph_reserve()` resets the scheduler
+   (`ggml_backend_sched_reset()`, llama-context.cpp).
 2. **H6.1 generation-mode evaluation**: `scripts/triattention_generation_eval.py` is written
    and unblocked now that Phase 2 paged FA is fixed — run it.
 3. **Large-scale benchmarks**: Systematic benchmark harness across multiple GPUs, model

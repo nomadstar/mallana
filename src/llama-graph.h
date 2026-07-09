@@ -382,6 +382,10 @@ public:
     ggml_tensor * self_k_idxs_swa = nullptr; // I64 [n_batch]
     ggml_tensor * self_v_idxs_swa = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
 
+    // PagedAttention: page tables for the base and SWA caches (null = paging disabled)
+    ggml_tensor * self_v_page_table     = nullptr; // I32 [n_lpage, ns]
+    ggml_tensor * self_v_page_table_swa = nullptr; // I32 [n_lpage, ns]
+
     ggml_tensor * self_kq_mask         = nullptr; // F32 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_cnv     = nullptr; //     [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa     = nullptr; // F32 [n_kv, n_batch/n_stream, 1, n_stream]
