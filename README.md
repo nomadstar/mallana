@@ -20,6 +20,71 @@ a reference implementation, and documented limitations.
 
 ---
 
+## 🧪 Evaluator's Guide — Test Everything in Minutes
+
+Everything below is designed so you can verify the claims yourself, from a 60-second smoke
+test to the full numerical validation suite.
+
+### Option A — Docker (fastest, CPU-only)
+
+A prebuilt server image is published to GHCR:
+
+```bash
+docker pull ghcr.io/nomadstar/mallana:server-cpu
+
+# Serve any GGUF model straight from Hugging Face, with TurboQuant V-cache compression:
+docker run -p 8080:8080 ghcr.io/nomadstar/mallana:server-cpu \
+    -hf ggml-org/gemma-3-1b-it-GGUF \
+    --cache-type-k q8_0 --cache-type-v turbo3 -fa on
+
+# Or mount a local model:
+docker run -p 8080:8080 -v "$HOME/models:/models" ghcr.io/nomadstar/mallana:server-cpu \
+    -m /models/your-model.gguf --cache-type-v turbo3 -fa on
+```
+
+Then open `http://localhost:8080` for the built-in web UI, or hit the OpenAI-compatible API:
+
+```bash
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+### Option B — Build from source (unlocks CUDA + PagedAttention)
+
+```bash
+cmake -B build -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=ON && cmake --build build -j
+```
+
+(See [Quick Start](#quick-start) for Metal / ROCm variants.)
+
+### Feature test matrix
+
+| Feature | How to exercise it | What to look for |
+|---|---|---|
+| **TurboQuant KV compression** | `llama-cli -m model.gguf --cache-type-k q8_0 --cache-type-v turbo3 -fa on` | Coherent output; KV buffer size in the load log shrinks ~4.6× for V |
+| **Aggressive long-context compression** | `--cache-type-v turbo2 -c 32768` | KV memory 6.4× smaller vs f16 at the same context length |
+| **PagedAttention (native paged FA)** | `LLAMA_PAGING=1 llama-cli -m model.gguf -ngl 99 -fa on ...` (CUDA build, KV fully on GPU) | Identical output vs `LLAMA_PAGING=0`; log line confirming paging is active |
+| **TriAttention KV eviction** | See [docs/paged-attention.md](docs/paged-attention.md) — experimental, off by default (`triattention_page_budget = 0`) | Research feature; calibration status in `research/milestone-007/` |
+| **Correctness suite** | `bash scripts/validate.sh` | Incremental build + full ctest (`-L main`), all green |
+| **Per-architecture regression (the hard one)** | `LLAMA_PAGING=1 ./build/bin/test-llama-archs` | **0 failures across 109 checks** — every supported architecture matches the CPU reference under paged attention (CUDA) |
+| **Perplexity quality gate** | `MODEL=/path/model.gguf WIKI=/path/wiki.test.raw bash scripts/turbo-quality-gate.sh` | TurboQuant PPL within 5% of the fp16 baseline |
+| **Throughput benchmark** | `python3 scripts/benchmark.py` | Prompt/generation t/s per model (table below measured on an RTX 2050) |
+| **Multi-agent Research OS** | `python3 scripts/multiswarm.py --audit` | opencode audits the current diff and writes `.multiswarm_audit.md` |
+
+### Notes for evaluators
+
+- **PagedAttention is opt-in** (`LLAMA_PAGING=1`) and currently requires the KV cache to be
+  fully resident on CUDA devices — the loader verifies this and falls back with a warning
+  otherwise. This gate exists because paging is validated on CUDA only (see
+  [docs/paged-attention.md](docs/paged-attention.md) for the design and status).
+- **TurboQuant types are opt-in** via `--cache-type-k` / `--cache-type-v`; everything else in
+  llama.cpp behaves exactly like upstream.
+- **Known limitation to not trip over**: Qwen-family models degrade with *any* low-bit K-cache
+  quantization (including upstream `q4_0`) — use `q8_0`/`f16` for K there (details
+  [below](#qwen-compatibility)).
+
+---
+
 ## Project Overview
 
 TurboQuant applies Walsh-Hadamard Transform (WHT) rotation followed by polar codebook
@@ -56,7 +121,7 @@ Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Othe
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
 | Quality Gate (automated PPL + speed) | ✅ Operational |
 | Paged Attention (Phase 1) | ✅ Functional |
-| Paged Attention (Phase 2) | ✅ Fixed 2026-07-02 — native paged FA works with `-fa on`; see `docs/roadmap.md` |
+| Paged Attention (Phase 2) | ✅ Validated on CUDA 2026-07-09 — `LLAMA_PAGING=1 test-llama-archs` 0 failures; opt-in via `LLAMA_PAGING=1` |
 | TriAttention | 🚧 Implemented — Pending Validation |
 | TriAttention Calibration (M007) | 🔄 H6.1 INDETERMINADO — batch mode prevents eviction; generation-mode eval needed |
 | ROCm / HIP Portability Audit | ✅ Complete — HIP compatibility fixes validated |
@@ -261,7 +326,8 @@ KV Cache (per layer)
 
 | Milestone | Priority |
 |---|---|
-| Paged Attention Phase 2 (native paged FA, code-complete pending validation) | P2 |
+| Re-enable PagedAttention by default (CUDA divergences fixed; owner decision) | P1 |
+| ROCm/HIP PagedAttention validation | P2 |
 | TriAttention calibration and numerical validation | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |
@@ -298,7 +364,7 @@ on a validated foundation.
 ### Phase 3 — Paged Attention (In Progress)
 
 - [x] Phase 1: Gather-before-FA with dynamic page allocation (✅ Functional)
-- [x] Phase 2: Native paged FA (page-table-lookup in kernel) (🚧 Pending Validation)
+- [x] Phase 2: Native paged FA (page-table-lookup in kernel) (✅ Validated on CUDA — `LLAMA_PAGING=1 test-llama-archs` 0 failures, 2026-07-09)
 - [x] Phase 3: TriAttention KV eviction via RoPE-inverted key scoring (🚧 Pending Validation)
 - [x] M007: TriAttention calibration infrastructure (`scripts/triattention_calibrate.py`, milestone stubs, calibration run complete — H6.1 INDETERMINADO; generation-mode eval required)
 - [ ] Sliding window support
