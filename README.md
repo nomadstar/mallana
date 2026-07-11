@@ -78,6 +78,20 @@ cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100 \
 Set `AMDGPU_TARGETS` to your GPU's arch (`gfx1100` RX 7900 / W7900, `gfx942` MI300,
 `gfx1201` RX 9070, etc.) — run `rocminfo | grep gfx` to find it.
 
+#### 📊 ROCm Compatibility & Validation Matrix
+
+Tested on **gfx1100 (RDNA3), ROCm 7.2.4** using Gemma 3 4B:
+
+| Configuration | pp2048 (t/s) | tg128 (t/s) | Status | Note |
+|---|---|---|---|---|
+| K=F16, V=F16 (Baseline) | 5279.61 ± 2.96 | 116.03 ± 0.00 | ✅ OK | Baseline |
+| K=F16, V=turbo3 | 5174.49 ± 55.86 | 84.34 ± 0.08 | ✅ OK | Prefill within 2% of baseline |
+| K=F16, V=turbo2 | — | — | ❌ CRASH | Fails in Flash Attention (`fattn.cu:334`) |
+| K=q8_0, V=F16 | — | — | ❌ CRASH | Fails in Flash Attention (`fattn.cu:334`) |
+
+> [!WARNING]
+> **Flash Attention Constraints**: Flash Attention (`-fa 1`) on RDNA3 GPUs has strict compatibility checks for KV formats. Use `ctk f16` for keys and either `ctv f16` or `ctv turbo3` for values. Avoid `turbo2` or `q8_0` for K cache with Flash Attention enabled, as they trigger assertions in `fattn.cu:334`.
+
 **Docker with GPU passthrough:**
 
 ```bash

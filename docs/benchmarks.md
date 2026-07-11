@@ -103,7 +103,16 @@ See performance data above for Apple Silicon M5 Max.
 
 ### HIP/ROCm
 
-> **TODO**: ROCm benchmarks (RDNA3/CDNA3) to be added for turbo3/turbo2.
+Validated on **AMD Radeon Graphics (gfx1100 / RDNA3)** under ROCm 7.2.4 with Gemma 3 4B (fully offloaded, `ngl 99`, `-fa 1`, 2 runs):
+
+| Configuration | Prompt Processing (pp2048) | Token Generation (tg128) | Status |
+|---|---|---|---|
+| K=F16, V=F16 (Baseline) | 5279.61 ± 2.96 t/s | 116.03 ± 0.00 t/s | ✅ OK |
+| K=F16, V=turbo3 | 5174.49 ± 55.86 t/s | 84.34 ± 0.08 t/s | ✅ OK |
+| K=F16, V=turbo2 | — | — | ❌ CRASH (`fattn.cu:334`) |
+| K=q8_0, V=F16 | — | — | ❌ CRASH (`fattn.cu:334`) |
+
+*Note: TurboQuant V3 prompt processing speed matches the FP16 baseline within 2%, showing minimal overhead during prefill.*
 
 ---
 

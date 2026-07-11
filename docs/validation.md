@@ -184,6 +184,14 @@ attention, but the overhead is measurable.
 Combining `sinks=1`, turbo3 KV cache, and `logit_softcap` (Gemma family) produces wrong
 results on CUDA. Workaround: avoid using `sinks` with turbo3 KV on CUDA with Gemma models.
 
+### Flash Attention Constraints on ROCm (AMD GPUs)
+
+Validation on **gfx1100 (RDNA3)** under ROCm 7.2.4 showed that Flash Attention (`-fa 1`) has strict format constraints in the backend kernels:
+* **Compatible**: `ctk f16` + `ctv f16` or `ctv turbo3`.
+* **Incompatible**: Any configuration utilizing `turbo2` or `q8_0` for K cache under Flash Attention triggers a fatal abort at `ggml-cuda/fattn.cu:334`.
+
+**Workaround**: When running with `-fa 1` on AMD GPUs, use `ctk f16` and restrict V cache to `turbo3`.
+
 ---
 
 ## Regression Testing
