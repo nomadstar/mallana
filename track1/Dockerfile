@@ -36,17 +36,25 @@ WORKDIR /app
 # Copy the statically compiled llama-server
 COPY --from=builder /app/build/bin/llama-server /app/llama-server
 
-# Bake in the small 0.5B model during build to ensure instant start and no runtime downloads
-RUN curl -L -o /app/model.gguf "https://huggingface.co/bartowski/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf"
+# Bake in a general-purpose instruct model during build (instant start, no runtime downloads).
+# Qwen2.5-1.5B-Instruct (Apache-2.0) — a real capability jump over the old 0.5B coder model for
+# a general-purpose agent, still small enough to stay responsive on CPU. Overridable at build
+# time (e.g. --build-arg MODEL_URL=.../qwen2.5-3b-instruct-q4_k_m.gguf) since TurboQuant's
+# compressed V-cache leaves headroom for a larger model on capable hardware.
+ARG MODEL_URL=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+RUN curl -L -o /app/model.gguf "${MODEL_URL}"
 
 # Copy the lightweight python router
 COPY track1/router.py /app/router.py
 RUN chmod +x /app/router.py
 
-# Env vars
+# Env vars — all local. TurboQuant KV compression is on by default (the router applies it).
 ENV PORT=8080
 ENV LOCAL_PORT=8081
 ENV LOCAL_MODEL_PATH=/app/model.gguf
+ENV CACHE_TYPE_K=q8_0
+ENV CACHE_TYPE_V=turbo3
+ENV CTX_SIZE=4096
 
 EXPOSE 8080
 

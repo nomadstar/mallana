@@ -208,6 +208,23 @@ yet supported (require importance-based quantization kernels from upstream llama
 
 ---
 
+## Benchmarks — AMD Radeon (gfx1100 / RDNA3, ROCm 7.2.4)
+
+TurboQuant KV compression on real AMD hardware. Model: Qwen2.5-Coder-7B-Q8_0,
+`llama-bench -fa 1 -ngl 99 -p 2048 -n 128 -r 3`, K cache held at `q8_0`.
+
+| KV config | V compression | Prompt (t/s) | Generation (t/s) |
+|---|---|---|---|
+| `f16` K / `f16` V (baseline) | 1× | 2823.7 | 80.0 |
+| `q8_0` K / `turbo3` V | 4.6× | 2808.6 | 75.0 |
+| `q8_0` K / `turbo2` V | 6.4× | 2797.4 | 75.7 |
+
+TurboQuant costs ~0.5% of prompt throughput and ~6% of generation throughput while shrinking
+the value cache 4.6–6.4×. On RDNA3 the compression is effectively free at the token level — the
+savings land in KV memory, which is what lets long contexts fit in VRAM.
+
+---
+
 ## Validation Results
 
 ### CPU/CUDA Mathematical Consistency Audit

@@ -66,6 +66,23 @@ Qwen-family models exhibit K activation outliers that break all low-bit quantiza
 | turbo4 | 8K | pp8192 | 1098.56 |
 | turbo4 | 8K | tg128 | 50.13 |
 
+### ROCm (AMD Radeon gfx1100 / RDNA3, ROCm 7.2.4, Qwen2.5-Coder-7B-Q8_0)
+
+`llama-bench -fa 1 -ngl 99 -p 2048 -n 128 -r 3`, K cache held at `q8_0`:
+
+| KV config | V compression | pp2048 (t/s) | tg128 (t/s) |
+|---|---|---|---|
+| f16 K / f16 V (baseline) | 1× | 2823.68 ± 1.50 | 80.00 ± 0.05 |
+| q8_0 K / turbo3 V | 4.6× | 2808.55 ± 2.63 | 74.96 ± 0.16 |
+| q8_0 K / turbo2 V | 6.4× | 2797.36 ± 2.56 | 75.70 ± 0.11 |
+
+TurboQuant V compression costs ~0.5% prompt throughput and ~6% generation throughput on RDNA3
+while shrinking the value cache 4.6–6.4×. First validated 2026-07-11 on a gfx1100.
+
+> **NOTE**: mixed cache pairs such as `q8_0` K / `f16` V require building with
+> `-DGGML_CUDA_FA_ALL_QUANTS=ON`; the default build ships the symmetric pairs plus the
+> always-enabled TurboQuant combos (`q8_0`/`turboN`, `turboN`/`turboN`).
+
 > **TODO**: Systematic benchmarks across multiple GPUs, model sizes, and context lengths
 > will be maintained in `benches/` as they become available.
 
