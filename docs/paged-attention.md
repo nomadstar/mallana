@@ -259,9 +259,10 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 5. **Block-size hard-coded** — Currently fixed at 32 tokens. Dynamic block size selection
    could optimize for different sequence lengths.
 
-6. **Phase 2 not numerically validated** — The code compiles and links, but numerical
-   parity against Phase 1 and the non-paged baseline has not been confirmed. Pending
-   validation before merging.
+6. **Phase 2 numerically validated on CUDA only** — `LLAMA_PAGING=1 test-llama-archs`
+   passes with 0 failures on CUDA (2026-07-09, after the ISWA/hybrid page-table wiring
+   fixes), and the paging-off suite is unchanged. ROCm/HIP validation and byte-level V
+   comparison remain open (see `docs/roadmap.md`).
 
 7. **4D view stride correctness** — The `ggml_view_4d` strides for the paged pool are
    designed to produce correct `nb21`/`nb22` values after `ggml_permute(0,2,1,3)`. Any
@@ -296,7 +297,7 @@ v_cur ──► cpy_v ──► V_pool ──► view_4d ──► permute ─�
 | 6 | ABI compat stubs for `fattn-mma-f16.cuh` and `fattn-wmma-f16.cu` | ✅ |
 | 7 | Add `ggml_flash_attn_ext_set_page_table()` API | ✅ |
 | 8 | Wire graph to skip gather and create 4D pool view when FA + paging active | ✅ |
-| 9 | Numerical validation (pending) | 🚧 |
+| 9 | Numerical validation (CUDA: `LLAMA_PAGING=1 test-llama-archs` 0 failures) | ✅ |
 
 ### Phase 3 — TriAttention KV Eviction (Implemented)
 

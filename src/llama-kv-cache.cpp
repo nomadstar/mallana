@@ -2848,6 +2848,13 @@ bool llama_kv_cache_context::is_paged() const {
     return kv->get_pg_enabled();
 }
 
+uint32_t llama_kv_cache_context::get_current_n_stream() const {
+    if (i_cur < sinfos.size()) {
+        return sinfos[i_cur].s1 - sinfos[i_cur].s0 + 1;
+    }
+    return kv ? kv->get_n_stream() : 1;
+}
+
 ggml_tensor * llama_kv_cache_context::get_v_paged(ggml_context * ctx, int32_t il) const {
     return kv->get_v_paged(ctx, il, n_kv, sinfos[i_cur]);
 }

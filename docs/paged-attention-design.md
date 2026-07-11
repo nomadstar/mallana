@@ -290,8 +290,9 @@ Phase 2 (native paged FA) extends the approach:
 The existing TurboQuant zero-padding, WHT rotation, and block encoding remain orthogonal
 to paging and required zero modification.
 
-**Validation note:** Phase 2 code compiles but awaits numerical parity testing against
-Phase 1 and the non-paged baseline.
+**Validation note:** Phase 2 is numerically validated on CUDA (`LLAMA_PAGING=1
+test-llama-archs`, 0 failures, 2026-07-09). ROCm/HIP validation and a byte-level V-pool
+comparison against the non-paged baseline remain open.
 
 **Smallest working unit**: Steps 1–4 of the Phase 1 validation sequence produce a
 functionally correct system with identity page tables. Phase 2 builds on this foundation,

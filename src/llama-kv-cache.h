@@ -384,6 +384,8 @@ public:
 
     // PagedAttention V gather support
     bool          is_paged() const;
+    // physical stream count of the current sinfo (s1 - s0 + 1), used to size page tables and V pool views
+    uint32_t      get_current_n_stream() const;
     ggml_tensor * get_v_paged(ggml_context * ctx, int32_t il) const;
     ggml_tensor * build_input_v_page_table(ggml_context * ctx, uint32_t n_seq) const;
     void          set_input_v_page_table(ggml_tensor * dst, const llama_ubatch * ubatch) const;

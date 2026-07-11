@@ -76,12 +76,12 @@ if [ -f "scripts/turbo-quality-gate.sh" ]; then
     # We call it. If it fails, fail this script too.
     # Check if dependencies (model, wikitext-2) are available in default locations.
     # If not, warn but don't fail unless explicitly requested.
-    WIKI_FILE="${WIKI:-~/local_llms/llama.cpp/wikitext-2-raw/wiki.test.raw}"
-    MODEL_FILE="${MODEL:-~/local_llms/models/Qwen3.5-35B-A3B-Q8_0.gguf}"
+    WIKI_FILE="${WIKI:-$HOME/local_llms/llama.cpp/wikitext-2-raw/wiki.test.raw}"
+    MODEL_FILE="${MODEL:-$HOME/local_llms/models/Qwen3.5-35B-A3B-Q8_0.gguf}"
 
-    if [ ! -f "$MODEL_FILE" ] && [ -z "$FORCE_GATE" ]; then
-        echo -e "${YELLOW}Warning: Quality Gate model '$MODEL_FILE' not found.${RESET}"
-        echo -e "To run perplexity gates, download the model or set MODEL=/path/to/model.gguf."
+    if { [ ! -f "$MODEL_FILE" ] || [ ! -f "$WIKI_FILE" ]; } && [ -z "$FORCE_GATE" ]; then
+        echo -e "${YELLOW}Warning: Quality Gate model '$MODEL_FILE' or wikitext '$WIKI_FILE' not found.${RESET}"
+        echo -e "To run perplexity gates, download the missing files or set MODEL=/path/to/model.gguf and WIKI=/path/to/wiki.test.raw."
         echo -e "Skipping perplexity check."
     else
         if bash scripts/turbo-quality-gate.sh; then

@@ -10,6 +10,7 @@
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -48,6 +49,51 @@ static bool can_reuse_kq_mask(
     res &= (kq_mask->ne[3] == n_stream);
 
     return res;
+}
+
+// PagedAttention: validate that a previously built V page table is still compatible with the
+// new KV context and ubatch. The table's row capacity (ne[1]) is fixed at graph build time,
+// so reusing a graph for a ubatch with more sequences would leave the FA kernel indexing
+// past the end of the table (same class as the n_seq page-table OOB bug, via reuse).
+static bool validate_page_table(
+        const ggml_tensor * ptable,
+        const llama_kv_cache_context * mctx,
+        const llama_ubatch & ubatch) {
+    if (!mctx || !mctx->is_paged()) {
+        // the page table must exist iff the KV context is paged
+        return ptable == nullptr;
+    }
+
+    if (!ptable) {
+        return false;
+    }
+
+    // op_params[0]: pg_block_size, op_params[1]: ns (physical stream count) - see build_input_v_page_table()
+    const int32_t block_size = ptable->op_params[0];
+    if (block_size <= 0) {
+        return false;
+    }
+
+    // the stored stream count is baked into the graph (the 4D V pool view is sized from it),
+    // so it must match the stream count of the new KV context - not just the value at build time
+    const uint32_t curr_ns = mctx->get_current_n_stream();
+    if (ptable->op_params[1] != (int32_t) curr_ns) {
+        return false;
+    }
+
+    // number of logical pages must match the current KV window
+    const int64_t n_lpage = ((int64_t) mctx->get_n_kv() + block_size - 1) / block_size;
+    if (ptable->ne[0] != n_lpage) {
+        return false;
+    }
+
+    // row capacity must cover every batch-sequence the FA kernel will index
+    const int64_t n_rows_min = std::max((int64_t) curr_ns, (int64_t) ubatch.n_seqs);
+    if (ptable->ne[1] < n_rows_min) {
+        return false;
+    }
+
+    return true;
 }
 
 // impl
@@ -447,6 +493,8 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
 
     res &= can_reuse_kq_mask(self_kq_mask, mctx, params.ubatch, params.cparams);
 
+    res &= validate_page_table(self_v_page_table, mctx, params.ubatch);
+
     return res;
 }
 
@@ -505,6 +553,9 @@ bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
 
     res &= can_reuse_kq_mask(self_kq_mask,     mctx->get_base(), params.ubatch, params.cparams);
     res &= can_reuse_kq_mask(self_kq_mask_swa, mctx->get_swa(),  params.ubatch, params.cparams);
+
+    res &= validate_page_table(self_v_page_table,     mctx->get_base(), params.ubatch);
+    res &= validate_page_table(self_v_page_table_swa, mctx->get_swa(),  params.ubatch);
 
     return res;
 }
@@ -572,6 +623,8 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
   //res &= inp_attn->self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask, mctx->get_attn(), params.ubatch, params.cparams);
+
+    res &= validate_page_table(inp_attn->self_v_page_table, mctx->get_attn(), params.ubatch);
 
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
 
@@ -682,6 +735,8 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
       //res &= inp_attn->self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
         res &= can_reuse_kq_mask(inp_attn->self_kq_mask, attn_ctx->get_base(), params.ubatch, params.cparams);
+
+        res &= validate_page_table(inp_attn->self_v_page_table, attn_ctx->get_base(), params.ubatch);
     }
 
     // swa tensors may not be allocated if there are no SWA attention layers
@@ -690,6 +745,8 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
       //res &= inp_attn->self_v_idxs_swa->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
         res &= can_reuse_kq_mask(inp_attn->self_kq_mask_swa, attn_ctx->get_swa(), params.ubatch, params.cparams);
+
+        res &= validate_page_table(inp_attn->self_v_page_table_swa, attn_ctx->get_swa(), params.ubatch);
     }
 
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();

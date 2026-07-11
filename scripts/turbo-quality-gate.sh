@@ -7,13 +7,13 @@
 
 set -e
 
-LLAMA=${LLAMA:-~/local_llms/llama.cpp/build-turbo/bin}
-MODEL=${MODEL:-~/local_llms/models/Qwen3.5-35B-A3B-Q8_0.gguf}
-WIKI=${WIKI:-~/local_llms/llama.cpp/wikitext-2-raw/wiki.test.raw}
+LLAMA=${LLAMA:-$HOME/local_llms/llama.cpp/build-turbo/bin}
+MODEL=${MODEL:-$HOME/local_llms/models/Qwen3.5-35B-A3B-Q8_0.gguf}
+WIKI=${WIKI:-$HOME/local_llms/llama.cpp/wikitext-2-raw/wiki.test.raw}
 
 if [ ! -f "$WIKI" ]; then
     echo "Downloading wikitext-2..."
-    bash ~/local_llms/llama.cpp/scripts/get-wikitext-2.sh
+    bash "$HOME/local_llms/llama.cpp/scripts/get-wikitext-2.sh"
 fi
 
 FAIL=0
@@ -25,7 +25,7 @@ echo ""
 
 # --- Test 1: Perplexity ---
 echo "[1/2] Running perplexity check (8 chunks)..."
-PPL_TURBO=$($LLAMA/llama-perplexity -m $MODEL -f $WIKI -c 512 -ctk turbo3 -ctv turbo3 -fa on --chunks 8 -ngl 99 2>&1 | grep "Final" | grep -oE 'PPL = [0-9.]+' | grep -oE '[0-9.]+')
+PPL_TURBO=$("$LLAMA/llama-perplexity" -m "$MODEL" -f "$WIKI" -c 512 -ctk turbo3 -ctv turbo3 -fa on --chunks 8 -ngl 99 2>&1 | grep "Final" | grep -oE 'PPL = [0-9.]+' | grep -oE '[0-9.]+')
 
 if [ -z "$PPL_TURBO" ]; then
     echo "  FAIL: Could not get turbo3 perplexity (crash or timeout)"
@@ -45,8 +45,8 @@ echo ""
 
 # --- Test 2: Context Scaling ---
 echo "[2/2] Running context scaling check (4K prefill)..."
-TURBO_TPS=$($LLAMA/llama-perplexity -m $MODEL -f $WIKI -c 4096 -ctk turbo3 -ctv turbo3 -fa on --chunks 4 -ngl 99 2>&1 | grep "prompt eval" | grep -oE '[0-9.]+ tokens per second' | grep -oE '[0-9.]+')
-Q8_TPS=$($LLAMA/llama-perplexity -m $MODEL -f $WIKI -c 4096 -ctk q8_0 -ctv q8_0 -fa on --chunks 4 -ngl 99 2>&1 | grep "prompt eval" | grep -oE '[0-9.]+ tokens per second' | grep -oE '[0-9.]+')
+TURBO_TPS=$("$LLAMA/llama-perplexity" -m "$MODEL" -f "$WIKI" -c 4096 -ctk turbo3 -ctv turbo3 -fa on --chunks 4 -ngl 99 2>&1 | grep "prompt eval" | grep -oE '[0-9.]+ tokens per second' | grep -oE '[0-9.]+')
+Q8_TPS=$("$LLAMA/llama-perplexity" -m "$MODEL" -f "$WIKI" -c 4096 -ctk q8_0 -ctv q8_0 -fa on --chunks 4 -ngl 99 2>&1 | grep "prompt eval" | grep -oE '[0-9.]+ tokens per second' | grep -oE '[0-9.]+')
 
 if [ -z "$TURBO_TPS" ] || [ -z "$Q8_TPS" ]; then
     echo "  FAIL: Could not measure speed (crash or timeout)"

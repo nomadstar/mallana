@@ -141,7 +141,9 @@ through a dedicated GGML API.
 - `llama-graph.cpp` now has the Phase 2 branch that skips gather, builds a 4D pool view, and
   calls `set_page_table()` when FA + paging are active.
 
-**Status**: Implemented, build passes, pending GPU numerical validation.
+**Status**: Complete. Numerically validated on CUDA — `LLAMA_PAGING=1 test-llama-archs` passes
+with 0 failures (2026-07-09, after the ISWA/hybrid page-table wiring fixes); the paging-off
+suite is unchanged. ROCm/HIP validation remains open.
 
 ### Mathematical consistency audit — CPU/CUDA equivalence verified
 
