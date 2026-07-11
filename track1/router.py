@@ -8,7 +8,10 @@ import os
 import subprocess
 import time
 import threading
-import sys
+import logging
+
+# Setup logging to stdout
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Configuration
 PORT = int(os.environ.get("PORT", "8080"))
@@ -21,8 +24,10 @@ FIREWORKS_MODEL = os.environ.get("FIREWORKS_MODEL", "accounts/fireworks/models/l
 local_process = None
 local_ready = False
 
+
 def log(msg):
-    print(f"[ROUTER] {msg}", flush=True)
+    logging.info(f"[ROUTER] {msg}")
+
 
 # Resolve paths for local testing or inside Docker
 if os.path.exists("/app/llama-server"):
@@ -59,6 +64,7 @@ else:
             resolved_model_path = m
             break
 
+
 def check_local_health():
     """Poll the local llama-server health endpoint."""
     global local_ready
@@ -81,6 +87,7 @@ def check_local_health():
             local_ready = False
 
         time.sleep(2)
+
 
 def start_local_server():
     global local_process
@@ -119,8 +126,9 @@ def start_local_server():
 
         # Stream logs in a separate thread to keep stdout clean
         def log_streamer():
-            for line in local_process.stdout:
-                print(f"[LLAMA-SERVER] {line.strip()}", flush=True)
+            if local_process.stdout is not None:
+                for line in local_process.stdout:
+                    logging.info(f"[LLAMA-SERVER] {line.strip()}")
         threading.Thread(target=log_streamer, daemon=True).start()
 
         # Start health check thread
@@ -128,6 +136,7 @@ def start_local_server():
 
     except Exception as e:
         log(f"Failed to start local llama-server: {e}")
+
 
 class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
 
@@ -302,6 +311,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
             log(f"Exception while proxying to {url}: {e}")
             return False
 
+
 def run_router():
     server = http.server.HTTPServer(("0.0.0.0", PORT), RouterHTTPHandler)
     log(f"Router listening on 0.0.0.0:{PORT}...")
@@ -315,6 +325,7 @@ def run_router():
             log("Stopping local llama-server...")
             local_process.terminate()
             local_process.wait()
+
 
 if __name__ == "__main__":
     # Start local model server if Fireworks key is not present
