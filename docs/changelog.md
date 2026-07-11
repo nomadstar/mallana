@@ -143,7 +143,10 @@ through a dedicated GGML API.
 
 **Status**: Complete. Numerically validated on CUDA — `LLAMA_PAGING=1 test-llama-archs` passes
 with 0 failures (2026-07-09, after the ISWA/hybrid page-table wiring fixes); the paging-off
-suite is unchanged. ROCm/HIP validation remains open.
+suite is unchanged. ROCm/HIP validated on real AMD hardware (gfx1100 / RDNA3, ROCm 7.2.4,
+2026-07-11): `test-turbo-quant` and `test-llama-archs` pass with NMSE 1e-8–1e-12 on `AMD Radeon
+Graphics`. Remaining ROCm work: PagedAttention (`LLAMA_PAGING=1`, still CUDA-only) and ROCWMMA
+Flash Attention (`-DGGML_HIP_ROCWMMA_FATTN=ON`) on AMD.
 
 ### Mathematical consistency audit — CPU/CUDA equivalence verified
 

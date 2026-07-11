@@ -57,6 +57,43 @@ cmake -B build -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=ON && cmake --build build -j
 
 (See [Quick Start](#quick-start) for Metal / ROCm variants.)
 
+### Option C — AMD GPU (ROCm / HIP) 🔴
+
+Validated on real AMD hardware — **gfx1100 (RDNA3), ROCm 7.2.4** — with `test-llama-archs`
+matching the CPU reference at NMSE 1e-8–1e-12 across every architecture.
+
+**Native build** (fastest path on an AMD box):
+
+```bash
+HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100 \
+      -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON \
+  && cmake --build build -j$(nproc)
+
+# Prove it end-to-end on the GPU:
+./build/bin/test-turbo-quant
+./build/bin/test-llama-archs          # every arch OK on "AMD Radeon Graphics"
+```
+
+Set `AMDGPU_TARGETS` to your GPU's arch (`gfx1100` RX 7900 / W7900, `gfx942` MI300,
+`gfx1201` RX 9070, etc.) — run `rocminfo | grep gfx` to find it.
+
+**Docker with GPU passthrough:**
+
+```bash
+docker build -f .devops/rocm.Dockerfile --target server -t mallana:server-rocm .
+
+docker run --device /dev/kfd --device /dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    -p 8080:8080 mallana:server-rocm \
+    -hf ggml-org/gemma-3-1b-it-GGUF --cache-type-v turbo3 -fa on -ngl 99
+```
+
+The `--device /dev/kfd --device /dev/dri --group-add video` flags are what expose the AMD GPU
+to the container. Then run with `--cache-type-v turbo3 -ngl 99` to exercise TurboQuant on the GPU.
+On some hosts `/dev/dri/renderD*` is owned by the `render` group — add `--group-add render`
+too if the container can't see the GPU.
+
 ### Feature test matrix
 
 | Feature | How to exercise it | What to look for |
@@ -124,7 +161,7 @@ Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Othe
 | Paged Attention (Phase 2) | ✅ Validated on CUDA 2026-07-09 — `LLAMA_PAGING=1 test-llama-archs` 0 failures; opt-in via `LLAMA_PAGING=1` |
 | TriAttention | 🚧 Implemented — Pending Validation |
 | TriAttention Calibration (M007) | 🔄 H6.1 INDETERMINADO — batch mode prevents eviction; generation-mode eval needed |
-| ROCm / HIP Portability Audit | ✅ Complete — HIP compatibility fixes validated |
+| ROCm / HIP (turbo2/3/4 + Flash Attention) | ✅ Validated on gfx1100 (RDNA3, ROCm 7.2.4) 2026-07-11 — `test-llama-archs` NMSE 1e-8–1e-12. PagedAttention (`LLAMA_PAGING=1`) is still CUDA-only |
 | Metal Support | ✅ Stable |
 | Vulkan Support | ❌ Not Started |
 

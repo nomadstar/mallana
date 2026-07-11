@@ -31,13 +31,14 @@
 | multiswarm.py: `--ci-status` / `--ci-fix` modes — query GitHub Actions runs via `gh`, download failed-step logs, and auto-compose a swarm task to fix them (no auto-push; owner reviews) | ✅ |
 | Sched-reset audit High finding fixed: added missing scheduler synchronization after `mctx->apply()` in `llama_context::memory_update()` so the async K-shift graph completes before `graph_reserve()` resets the scheduler | ✅ |
 | **Paged per-arch divergences fixed (2026-07-09).** All `LLAMA_PAGING=1` `test-llama-archs` failures (plamo2/3, gemma3n NMSE 0.85, olmo2, nemotron_h(+moe), granitehybrid, gpt-oss) had one root cause: the ISWA (`llm_graph_input_attn_kv_iswa`) and hybrid (`llm_graph_input_mem_hybrid*`) input paths never wired the V page table — the ISWA `build_attn` read the paged V pool as linear memory via `get_v`, and the hybrid `set_input`s never uploaded the page table. Fixed in `src/llama-graph.{h,cpp}` by mirroring the standard-KV paged wiring (build/set page tables for base+SWA caches, paged V view / gather fallback, `ggml_flash_attn_ext_set_page_table`). `LLAMA_PAGING=1 test-llama-archs` now 0 failures (was 8); paging-off suite unchanged (44/44). Default flip is a separate owner decision (P1 below). | ✅ |
+| **ROCm/HIP validated on real AMD hardware (2026-07-11).** Built with `-DGGML_HIP=ON` on a gfx1100 (RDNA3, ROCm 7.2.4) host: fixed the last HIP link failure — the FA VEC dispatch referenced the `turbo3_0↔f16` template instances but `ggml/src/ggml-hip/CMakeLists.txt` omitted those two `.cu` files (present in the CUDA list), leaving `ggml_cuda_flash_attn_ext_vec_case<D,TURBO3_0,F16>` and its transpose undefined. After the fix, `test-turbo-quant` passes (round-trip + NaN/Inf/outlier robustness) and `test-llama-archs` runs entirely on `AMD Radeon Graphics` with NMSE 1e-8–1e-12 across all architectures. `.devops/rocm.Dockerfile` base pinned to ROCm 7.2.4 (the `7.2` tag → 7.2.0 hits an nvfp4 HIP fp8 header error). | ✅ |
 
 ### Upcoming
 
 | Milestone | Priority |
 |---|---|
 | Re-enable PagedAttention by default: the per-arch CUDA divergences under `LLAMA_PAGING=1` are now fixed (ISWA/hybrid page-table wiring, 2026-07-09; `test-llama-archs` passes with paging on) — remaining step is the owner decision to flip the default | P1 |
-| ROCm/HIP validation of the test suite + paged FA on a 16 GB RDNA GPU (self-hosted runner candidate; hosted runners are CPU-only) | P2 |
+| ROCm/HIP remaining work: PagedAttention (`LLAMA_PAGING=1`) on AMD, ROCWMMA Flash Attention for turbo types (`-DGGML_HIP_ROCWMMA_FATTN=ON`), and a self-hosted AMD runner for CI | P2 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
 | Upstream synchronization | P3 |

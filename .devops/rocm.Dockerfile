@@ -1,8 +1,11 @@
 ARG UBUNTU_VERSION=24.04
 
 # This needs to generally match the container host's environment.
-ARG ROCM_VERSION=7.2
-ARG AMDGPU_VERSION=7.2
+# 7.2.4 pins the patch release: the `7.2`-complete tag resolves to 7.2.0, whose
+# HIP fp8 header rejects the nvfp4 device-side conversion in convert.cu (host/device
+# operator mismatch). 7.2.4 fixes that header; validated on a gfx1100 host.
+ARG ROCM_VERSION=7.2.4
+ARG AMDGPU_VERSION=7.2.4
 
 # Target the ROCm build image
 ARG BASE_ROCM_DEV_CONTAINER=rocm/dev-ubuntu-${UBUNTU_VERSION}:${ROCM_VERSION}-complete
@@ -34,10 +37,12 @@ WORKDIR /app
 
 COPY . .
 
+# ROCWMMA Flash Attention (-DGGML_HIP_ROCWMMA_FATTN=ON) is intentionally omitted: it is not
+# yet validated for the TurboQuant path (roadmap P2). The image ships the validated VEC/TILE
+# FA baseline instead.
 RUN HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
     cmake -S . -B build \
         -DGGML_HIP=ON \
-        -DGGML_HIP_ROCWMMA_FATTN=ON \
         -DAMDGPU_TARGETS="$ROCM_DOCKER_ARCH" \
         -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
         -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=OFF \
