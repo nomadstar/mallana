@@ -57,12 +57,9 @@ else
 fi
 
 # Full ctest suite (label 'main').
-# test-llama-archs is excluded: it has pre-existing NUMERICAL divergences on CUDA
-# (qwen 2.7e-02, phi2, glm4 1.4e-01, olmo 6.4e-01, etc.) unrelated to graph wiring.
-# Fixing those divergences is tracked as a separate P1 item in docs/roadmap.md.
 if [ -d "build" ] && [ -f "build/CTestTestfile.cmake" ]; then
     echo "Running ctest suite (label 'main')..."
-    if ctest --test-dir build -L main --timeout 600 -j4 --output-on-failure -E 'test-llama-archs'; then
+    if ctest --test-dir build -L main --timeout 600 -j4 --output-on-failure; then
         echo -e "  ${GREEN}PASS: ctest suite passed.${RESET}"
     else
         echo -e "  ${RED}FAIL: ctest suite reported failures.${RESET}"
