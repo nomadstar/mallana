@@ -69,7 +69,7 @@ def check_local_health():
             local_ready = False
             time.sleep(5)
             continue
-            
+
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=2) as resp:
@@ -79,7 +79,7 @@ def check_local_health():
                         local_ready = True
         except Exception:
             local_ready = False
-            
+
         time.sleep(2)
 
 def start_local_server():
@@ -87,9 +87,9 @@ def start_local_server():
     if not os.path.exists(resolved_model_path):
         log(f"Local model not found at {resolved_model_path}. Local fallback will not be available.")
         return
-        
+
     log(f"Starting local llama-server on port {LOCAL_PORT} with model {resolved_model_path}...")
-    
+
     # Base command
     cmd = [
         LLAMA_SERVER_BIN,
@@ -99,15 +99,15 @@ def start_local_server():
         "-c", "2048",
         "-ngl", "0"
     ]
-    
+
     # Add any extra args from environment
     extra_args = os.environ.get("LLAMA_ARGS", "")
     if extra_args:
         cmd.extend(extra_args.split())
-        
+
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH_ENV
-    
+
     try:
         local_process = subprocess.Popen(
             cmd,
@@ -116,30 +116,30 @@ def start_local_server():
             text=True,
             env=env
         )
-        
+
         # Stream logs in a separate thread to keep stdout clean
         def log_streamer():
             for line in local_process.stdout:
                 print(f"[LLAMA-SERVER] {line.strip()}", flush=True)
         threading.Thread(target=log_streamer, daemon=True).start()
-        
+
         # Start health check thread
         threading.Thread(target=check_local_health, daemon=True).start()
-        
+
     except Exception as e:
         log(f"Failed to start local llama-server: {e}")
 
 class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
-    
+
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
         # Prevent default logging to stderr/stdout to keep logs clean
         pass
-        
+
     def do_GET(self):
         global local_ready
-        
+
         # Health check
         if self.path in ("/health", "/healthcheck"):
             # If Fireworks is configured, we are immediately ready
@@ -150,7 +150,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'{"status":"ok","engine":"fireworks"}')
                 return
-                
+
             # Otherwise we require local server to be ready
             if local_ready:
                 self.send_response(200)
@@ -165,7 +165,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'{"status":"starting","engine":"local"}')
             return
-            
+
         # Get list of models (OpenAI spec)
         if self.path == "/v1/models":
             self.send_response(200)
@@ -186,7 +186,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
             }
             self.wfile.write(json.dumps(response_data).encode("utf-8"))
             return
-            
+
         # Default fallback
         self.send_response(404)
         self.send_header("Connection", "close")
@@ -200,10 +200,10 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Not Found")
             return
-            
+
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
-        
+
         try:
             req_data = json.loads(body.decode("utf-8"))
         except Exception as e:
@@ -212,23 +212,23 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f"Invalid JSON: {e}".encode("utf-8"))
             return
-            
+
         # Route request
         if FIREWORKS_API_KEY:
             log(f"Routing request to Fireworks AI (Model: {FIREWORKS_MODEL})...")
             req_data["model"] = FIREWORKS_MODEL
             url = "https://api.fireworks.ai/inference/v1/chat/completions" if self.path == "/v1/chat/completions" else "https://api.fireworks.ai/inference/v1/completions"
-            
+
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {FIREWORKS_API_KEY}"
             }
-            
+
             success = self.proxy_request(url, json.dumps(req_data).encode("utf-8"), headers)
             if success:
                 return
             log("Fireworks request failed or timed out. Falling back to local model...")
-            
+
         # Local fallback
         if not local_ready:
             self.send_response(503)
@@ -237,7 +237,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"error":"No backend ready (local loading or Fireworks failed)"}')
             return
-            
+
         log("Routing request to local llama-server...")
         url = f"http://127.0.0.1:{LOCAL_PORT}{self.path}"
         headers = {"Content-Type": "application/json"}
@@ -248,7 +248,7 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
         try:
             with urllib.request.urlopen(req, timeout=90) as resp:
                 self.send_response(resp.status)
-                
+
                 # Copy headers from backend response
                 is_stream = False
                 for k, v in resp.getheaders():
@@ -257,14 +257,14 @@ class RouterHTTPHandler(http.server.BaseHTTPRequestHandler):
                     if k.lower() == "content-type" and "text/event-stream" in v.lower():
                         is_stream = True
                     self.send_header(k, v)
-                    
+
                 if is_stream:
                     self.send_header("Transfer-Encoding", "chunked")
                     self.send_header("Connection", "keep-alive")
                 else:
                     self.send_header("Connection", "close")
                 self.end_headers()
-                
+
                 # Stream response
                 if is_stream:
                     while True:
@@ -323,5 +323,5 @@ if __name__ == "__main__":
         start_local_server()
     else:
         log("Fireworks API key detected. Running in cloud-only mode (local llama-server disabled).")
-        
+
     run_router()
