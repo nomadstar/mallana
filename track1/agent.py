@@ -35,8 +35,13 @@ TASK_OUTPUT_PATH = os.environ.get("TASK_OUTPUT_PATH", "/output/results.json")
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "8081"))
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LOCAL_MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "")
-CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "q8_0")
-CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "turbo3")   # TurboQuant compression — our edge
+# Correctness-first defaults: Flash Attention is OFF and cache is f16. The fork's FA path
+# currently corrupts generation on this build (repetitive-gibberish), and TurboQuant V-cache
+# REQUIRES FA (its dequant happens inside the FA kernel) — so turbo is only usable once FA is
+# fixed. Set FLASH_ATTN=on + CACHE_TYPE_V=turbo3 to opt back into the compressed path.
+FLASH_ATTN = os.environ.get("FLASH_ATTN", "off")
+CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "f16")
+CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "f16")
 CTX_SIZE = os.environ.get("CTX_SIZE", "4096")
 NGL = os.environ.get("LLAMA_NGL", "99")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
@@ -99,9 +104,9 @@ def start_local_server():
         log(f"no .gguf model found (set LOCAL_MODEL_PATH or place one under {MODELS_DIR}).")
         return False
 
-    log(f"starting llama-server: model={model} K={CACHE_TYPE_K} V={CACHE_TYPE_V} ngl={NGL}")
+    log(f"starting llama-server: model={model} K={CACHE_TYPE_K} V={CACHE_TYPE_V} fa={FLASH_ATTN} ngl={NGL}")
     cmd = [server_bin, "-m", model, "--port", str(LOCAL_PORT), "--host", "127.0.0.1",
-           "-c", CTX_SIZE, "-ngl", NGL, "-fa", "on",
+           "-c", CTX_SIZE, "-ngl", NGL, "-fa", FLASH_ATTN,
            "--cache-type-k", CACHE_TYPE_K, "--cache-type-v", CACHE_TYPE_V]
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = ld_path + os.pathsep + env.get("LD_LIBRARY_PATH", "")
