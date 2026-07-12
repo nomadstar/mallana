@@ -45,6 +45,8 @@ CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "f16")
 CTX_SIZE = os.environ.get("CTX_SIZE", "4096")
 NGL = os.environ.get("LLAMA_NGL", "99")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
+REPEAT_PENALTY = float(os.environ.get("REPEAT_PENALTY", "1.15"))
 
 # --- Timeout safety ---
 PER_TASK_TIMEOUT = float(os.environ.get("PER_TASK_TIMEOUT", "45"))       # seconds per task
@@ -134,10 +136,15 @@ def start_local_server():
 
 
 def answer_local(prompt, timeout):
+    # Greedy (temperature 0) collapses small quantized models into repetition loops on
+    # open-ended prompts (repeated-token gibberish). A low-but-nonzero temperature plus a
+    # repetition penalty keeps answers focused while avoiding the collapse.
     body = json.dumps({
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": MAX_TOKENS,
-        "temperature": 0.0,
+        "temperature": TEMPERATURE,
+        "top_p": 0.9,
+        "repeat_penalty": REPEAT_PENALTY,
         "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(
