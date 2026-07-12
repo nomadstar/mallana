@@ -442,9 +442,13 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
         }
 
-#ifndef GGML_USE_HIP
+        // Order the shared-memory KQ writes above (KQ[j*nthreads + tid]) before the reads
+        // below (KQ[j*nthreads + k], i.e. another lane's slot). This barrier must run on HIP
+        // too: on RDNA3 (wave32) the compiler/memory model does NOT guarantee the write is
+        // visible without it, so skipping it corrupted attention weights and produced
+        // repetitive-gibberish generation on gfx1100. (The turbo path reads via __shfl_sync,
+        // not shared memory, so it does not need this — hence the !V_is_turbo guard.)
         if constexpr (!V_is_turbo) { __syncwarp(); }
-#endif // GGML_USE_HIP
 
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
