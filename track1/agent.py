@@ -206,6 +206,18 @@ def main():
     log(f"{len(tasks)} task(s) from {TASK_INPUT_PATH}")
     server_ok = start_local_server()
 
+    # Warmup: the FIRST request to a freshly-loaded llama-server returns corrupted output (or a
+    # 500) on this build — subsequent requests are correct. Absorb that first request with a
+    # throwaway prompt so every real task is served warm. Retry once in case warmup itself 500s.
+    if server_ok:
+        for _ in range(2):
+            try:
+                answer_local("Hello.", min(30.0, PER_TASK_TIMEOUT))
+                break
+            except Exception as e:
+                log(f"warmup request failed (absorbing first-request bug): {e}")
+        log("warmup complete")
+
     results = []
     for i, task in enumerate(tasks):
         task_id = task.get("task_id", task.get("id", str(i)))
