@@ -161,6 +161,33 @@ def check_cli_tool(name):
     """Check if a CLI tool is available in the system PATH."""
     return shutil.which(name) is not None
 
+def inhibit_sleep(why="multiswarm run in progress"):
+    """Prevent the machine from suspending/hibernating for the lifetime of THIS process.
+
+    A long unattended swarm run (deep reasoning + multi-minute CUDA builds) must not be cut
+    short by the system going to sleep. Uses `systemd-inhibit` in block mode; the held command
+    is `tail --pid=<our pid> -f /dev/null`, which exits the instant this process dies — so the
+    inhibitor auto-releases even if multiswarm is killed or crashes (no orphaned lock). No-op if
+    `systemd-inhibit` is unavailable. Returns the Popen holding the lock (or None).
+    """
+    if not shutil.which("systemd-inhibit"):
+        print(f"{YELLOW}Note: 'systemd-inhibit' not found — cannot block sleep/hibernation; "
+              f"if this box can suspend, keep it awake by other means during long runs.{RESET}")
+        return None
+    try:
+        proc = subprocess.Popen(
+            ["systemd-inhibit", "--what=sleep:idle", "--who=multiswarm",
+             f"--why={why}", "--mode=block",
+             "tail", "--pid", str(os.getpid()), "-f", "/dev/null"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        print(f"{GREEN}🛡  Sleep/hibernation inhibited for this run (systemd-inhibit pid "
+              f"{proc.pid}); auto-releases when multiswarm exits.{RESET}")
+        return proc
+    except Exception as e:
+        print(f"{YELLOW}Could not acquire sleep inhibitor ({e}); continuing without it.{RESET}")
+        return None
+
 def format_cmd_display(cmd):
     """Return a human-readable command string, replacing long --prompt/--print values."""
     result = []
@@ -854,6 +881,10 @@ def main():
     parser.add_argument("--iterations", type=int, default=3, help="Max iterations/loops (default: 3)")
     parser.add_argument("--skip-permissions", action="store_true", help="Auto-approve tool permissions (skip prompts)")
     parser.add_argument("--no-interactive", action="store_true", help="Run without asking for confirmation between phases")
+    parser.add_argument("--no-inhibit-sleep", action="store_true",
+                        help="Do NOT block system sleep/hibernation during the run. By default "
+                             "multiswarm holds a systemd-inhibit lock so a long unattended run is "
+                             "not interrupted by the machine suspending.")
     parser.add_argument("--continue-session", action="store_true", help="Continue previous CLI sessions if possible")
     parser.add_argument("--use-plan", action="store_true", help="Use existing .multiswarm_plan.md without running Architect planning")
     parser.add_argument("--force-use-plan", action="store_true", help="Use existing plan even if its task field does not match --task")
@@ -936,6 +967,10 @@ def main():
         print(f"{RED}Error: The following required CLI tools are missing in the PATH: {', '.join(missing_tools)}{RESET}")
         print("Please ensure they are installed and in your environment PATH.")
         sys.exit(1)
+
+    # Keep the machine awake for the whole (possibly hours-long, unattended) run.
+    # Held for the lifetime of this process; auto-released on exit. Opt out with --no-inhibit-sleep.
+    _sleep_inhibitor = None if args.no_inhibit_sleep else inhibit_sleep()
 
     print(f"{BOLD}{GREEN}================================================================{RESET}")
     print(f"{BOLD}{GREEN}                 MULTISWARM ORCHESTRATION ENGINE                {RESET}")
