@@ -138,12 +138,13 @@ def start_local_server():
     env["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH_ENV
 
     try:
-        local_process = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        local_process = proc
 
         def log_streamer():
-            if local_process.stdout is not None:
-                for line in local_process.stdout:
+            if proc.stdout is not None:
+                for line in proc.stdout:
                     logging.info(f"[LLAMA-SERVER] {line.strip()}")
         threading.Thread(target=log_streamer, daemon=True).start()
         threading.Thread(target=check_local_health, daemon=True).start()
