@@ -56,13 +56,18 @@ if os.path.exists("/app/llama-server"):
     LLAMA_SERVER_BIN = "/app/llama-server"
     LD_LIBRARY_PATH_ENV = "/app"
 else:
+    # Prefer the locally-built mallana binary. We deliberately do NOT silently fall back to a
+    # `llama-server` on PATH: an upstream build there lacks TurboQuant cache types and would
+    # reject `--cache-type-v turbo3` at startup. Better to fail loudly than serve from the wrong
+    # binary. Override with LLAMA_SERVER_BIN if your build lives elsewhere.
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LLAMA_SERVER_BIN = "llama-server"
-    for b in [os.path.join(repo_root, "build/bin/llama-server"),
-              os.path.join(repo_root, "build/bin/Release/llama-server")]:
-        if os.path.exists(b):
-            LLAMA_SERVER_BIN = b
-            break
+    LLAMA_SERVER_BIN = os.environ.get("LLAMA_SERVER_BIN", "")
+    if not LLAMA_SERVER_BIN:
+        for b in [os.path.join(repo_root, "build/bin/llama-server"),
+                  os.path.join(repo_root, "build/bin/Release/llama-server")]:
+            if os.path.exists(b):
+                LLAMA_SERVER_BIN = b
+                break
     LD_LIBRARY_PATH_ENV = os.path.join(repo_root, "build/bin")
 
 # Resolve the model path.
@@ -101,6 +106,11 @@ def check_local_health():
 
 def start_local_server():
     global local_process
+    if not LLAMA_SERVER_BIN or not os.path.exists(LLAMA_SERVER_BIN):
+        log(f"FATAL: mallana llama-server binary not found (looked in build/bin/). "
+            f"Build it first (cmake --build build --target llama-server) or set LLAMA_SERVER_BIN. "
+            f"Refusing to fall back to a PATH binary, which would lack TurboQuant cache types.")
+        return
     if not os.path.exists(resolved_model_path):
         log(f"FATAL: local model not found at {resolved_model_path}. "
             f"Set LOCAL_MODEL_PATH — this router is local-only and cannot serve without a model.")

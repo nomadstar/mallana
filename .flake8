@@ -1,6 +1,10 @@
 [flake8]
 max-line-length = 125
-ignore = E203,E211,E221,E225,E231,E241,E251,E261,E266,E501,E701,E704,W503
+# NP100: the flake8-no-print plugin forbids print(), but the research/CLI scripts under
+# scripts/ (benchmark runners, calibration tools, the multiswarm orchestrator) print to
+# stdout by design — that IS their user-facing output. E1xx/E3xx here are cosmetic spacing.
+# F401/F841/F541 are tolerated in exploratory research scripts.
+ignore = E203,E211,E221,E225,E231,E241,E251,E261,E266,E501,E701,E704,W503,NP100,E126,E127,E128,E302,E305,F401,F841,F541
 exclude =
     # Do not traverse examples and tools
     examples,

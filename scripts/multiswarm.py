@@ -194,6 +194,9 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
         bufsize=0,
         text=True,
     )
+    # stdout is guaranteed non-None because we passed stdout=subprocess.PIPE above;
+    # assert it so static type-checkers (ty) don't flag the .readline() access below.
+    assert process.stdout is not None
     prefix_str = f"{BOLD}[{prefix}]{RESET} " if prefix else ""
     start = time.monotonic()
     last_output = [start]
