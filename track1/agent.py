@@ -46,7 +46,8 @@ CTX_SIZE = os.environ.get("CTX_SIZE", "4096")
 NGL = os.environ.get("LLAMA_NGL", "99")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-REPEAT_PENALTY = float(os.environ.get("REPEAT_PENALTY", "1.15"))
+FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0.3"))
+PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0.3"))
 
 # --- Timeout safety ---
 PER_TASK_TIMEOUT = float(os.environ.get("PER_TASK_TIMEOUT", "45"))       # seconds per task
@@ -137,21 +138,29 @@ def start_local_server():
 
 def answer_local(prompt, timeout):
     # Greedy (temperature 0) collapses small quantized models into repetition loops on
-    # open-ended prompts (repeated-token gibberish). A low-but-nonzero temperature plus a
-    # repetition penalty keeps answers focused while avoiding the collapse.
+    # open-ended prompts (repeated-token gibberish). A low-but-nonzero temperature plus
+    # frequency/presence penalties keeps answers focused while avoiding the collapse.
+    # NOTE: repeat_penalty is NOT an OpenAI-compatible parameter and causes HTTP 500 on
+    # /v1/chat/completions. Use frequency_penalty + presence_penalty instead.
     body = json.dumps({
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE,
         "top_p": 0.9,
-        "repeat_penalty": REPEAT_PENALTY,
+        "frequency_penalty": FREQUENCY_PENALTY,
+        "presence_penalty": PRESENCE_PENALTY,
         "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(
         f"http://127.0.0.1:{LOCAL_PORT}/v1/chat/completions",
         data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")
+        log(f"HTTP {e.code} from server: {body_text[:300]}")
+        raise
     return data["choices"][0]["message"]["content"].strip()
 
 
