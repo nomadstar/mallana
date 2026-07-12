@@ -29,36 +29,47 @@ token-minimizing leaderboard, running a stronger local model is exactly what bre
 Validated on real AMD hardware (Radeon gfx1100 / RDNA3): TurboQuant costs ~0.5% prompt and ~6%
 generation throughput while shrinking the V-cache up to 6.4× (see [../docs/benchmarks.md](../docs/benchmarks.md)).
 
-## What it is (and isn't)
+## Submission contract
 
-- **Is:** a dependency-free (Python stdlib only) HTTP proxy in front of mallana's `llama-server`,
-  launched with TurboQuant defaults (`-fa on --cache-type-k q8_0 --cache-type-v turbo3`).
-- **Isn't:** a cloud router, a cascade to a remote 70B, or anything that consumes billable tokens.
+The scorer runs the container as a **batch agent** (dependency-free, Python stdlib only):
+
+- reads tasks from `TASK_INPUT_PATH` (default `/input/tasks.json`) — a JSON array of
+  `{"task_id": str, "prompt": str}`;
+- answers each task on-device with mallana's `llama-server` (TurboQuant: `-fa on
+  --cache-type-k q8_0 --cache-type-v turbo3`), **0 Fireworks tokens**;
+- writes `TASK_OUTPUT_PATH` (default `/output/results.json`) — a JSON array of
+  `{"task_id": str, "answer": str}`, task IDs preserved exactly.
+
+**Timeout-safe by design** (the scorer enforces a runtime limit): a per-task wall-clock timeout
+(`PER_TASK_TIMEOUT`), a global deadline (`GLOBAL_DEADLINE`) that fills any remaining tasks
+rather than overrun, and an **atomic write after every task** so a partial run still produces a
+valid, scorable `results.json` — never a missing file, never a TIMEOUT-with-no-output.
+
+An optional Fireworks fallback (`ENABLE_FIREWORKS_FALLBACK=1`, off by default) escalates only
+tasks the local model fails, to `MODEL_CHEAP` — keeping tokens near zero while protecting the
+accuracy gate.
 
 ## Run it
 
-**Docker (self-contained, CPU-only, bakes in the model):**
+**Docker (self-contained, bakes in the model):**
 
 ```bash
-docker build -f track1/Dockerfile -t mallana-router .
-docker run -p 8080:8080 mallana-router
+docker build -f track1/Dockerfile -t mallana-agent .
+docker run -v "$PWD/input:/input" -v "$PWD/output:/output" mallana-agent
 ```
 
 **Directly against a local build:**
 
 ```bash
-LOCAL_MODEL_PATH=/path/to/model.gguf python3 track1/router.py
+TASK_INPUT_PATH=tasks.json TASK_OUTPUT_PATH=results.json \
+LOCAL_MODEL_PATH=/path/to/model.gguf python3 track1/agent.py
 ```
 
-## API
+## Live-server alternative (`router.py`)
 
-OpenAI-compatible: `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`,
-`GET /health`.
-
-```bash
-curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}]}'
-```
+For interactive use, `router.py` exposes the same local model over an OpenAI-compatible API
+(`/v1/chat/completions`, `/v1/models`, `/health`). It is **not** the submission entrypoint —
+`agent.py` (the batch contract) is.
 
 ## Configuration (all optional, all local)
 

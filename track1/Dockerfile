@@ -44,19 +44,24 @@ COPY --from=builder /app/build/bin/llama-server /app/llama-server
 ARG MODEL_URL=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
 RUN curl -L -o /app/model.gguf "${MODEL_URL}"
 
-# Copy the lightweight python router
+# Copy the batch agent (submission entrypoint) and the local server it drives.
+# agent.py is the Track 1 contract: reads TASK_INPUT_PATH, writes TASK_OUTPUT_PATH.
+# router.py is kept as an optional live-server alternative for interactive use.
+COPY track1/agent.py /app/agent.py
 COPY track1/router.py /app/router.py
-RUN chmod +x /app/router.py
+RUN chmod +x /app/agent.py /app/router.py
 
-# Env vars — all local. TurboQuant KV compression is on by default (the router applies it).
-ENV PORT=8080
+# Env vars — all local. TurboQuant KV compression on by default. Answering on-device costs
+# ZERO Fireworks tokens (the optimal token score); the agent only escalates to Fireworks if
+# ENABLE_FIREWORKS_FALLBACK is set and the local model fails a task.
 ENV LOCAL_PORT=8081
 ENV LOCAL_MODEL_PATH=/app/model.gguf
 ENV CACHE_TYPE_K=q8_0
 ENV CACHE_TYPE_V=turbo3
 ENV CTX_SIZE=4096
+ENV TASK_INPUT_PATH=/input/tasks.json
+ENV TASK_OUTPUT_PATH=/output/results.json
 
-EXPOSE 8080
-
-ENTRYPOINT ["python3", "/app/router.py"]
+# The scorer runs the container, mounts /input, and reads /output before the runtime limit.
+ENTRYPOINT ["python3", "/app/agent.py"]
 
