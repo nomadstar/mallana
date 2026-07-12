@@ -36,9 +36,9 @@ The scorer runs the container as a **batch agent** (dependency-free, Python stdl
 - reads tasks from `TASK_INPUT_PATH` (default `/input/tasks.json`) — a JSON array of
   `{"task_id": str, "prompt": str}`;
 - answers each task on-device with mallana's `llama-server`, **0 Fireworks tokens**. The shipped
-  defaults are correctness-first (`-fa off --cache-type-k f16 --cache-type-v f16`); TurboQuant's
-  compressed path (`-fa on --cache-type-v turbo3`) is opt-in via env once Flash Attention is
-  validated on the target hardware;
+  defaults enable **TurboQuant** (`-fa on --cache-type-k q8_0 --cache-type-v turbo3`) — the
+  6.4×-compressed value cache, validated coherent on the CPU-only image. For a plain baseline set
+  `FLASH_ATTN=off CACHE_TYPE_K=f16 CACHE_TYPE_V=f16`;
 - writes `TASK_OUTPUT_PATH` (default `/output/results.json`) — a JSON array of
   `{"task_id": str, "answer": str}`, task IDs preserved exactly.
 
@@ -98,9 +98,11 @@ For interactive use, `router.py` exposes the same local model over an OpenAI-com
 |---|---|---|
 | `MODELS_DIR` | `/models` | Dir scanned for a `*.gguf` when `LOCAL_MODEL_PATH` is unset |
 | `LOCAL_MODEL_PATH` | *(unset)* | Exact path to the GGUF served locally (overrides `MODELS_DIR`) |
-| `CACHE_TYPE_K` | `f16` | K cache type (`q8_0` to compress) |
-| `CACHE_TYPE_V` | `f16` | V cache type (`turbo3` for TurboQuant, requires `-fa on`) |
-| `FLASH_ATTN` | `off` | Flash Attention (`on` to enable TurboQuant's compressed V-cache) |
+| `CACHE_TYPE_K` | `q8_0` | K cache type (`f16` for uncompressed) |
+| `CACHE_TYPE_V` | `turbo3` | V cache type — TurboQuant 6.4× compression (`f16` for uncompressed) |
+| `FLASH_ATTN` | `on` | Flash Attention (required by TurboQuant's compressed V-cache) |
+| `MAX_TOKENS` | `768` | Max generated tokens per task |
+| `TEMPERATURE` | `0.3` | Sampling temperature |
 | `CTX_SIZE` | `2048` | Context window |
 | `LLAMA_NGL` | `99` | GPU layers to offload (ignored on CPU-only builds) |
 | `PORT` | `8080` | Router listen port |

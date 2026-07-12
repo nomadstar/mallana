@@ -18,6 +18,7 @@ FROM ubuntu:22.04 AS builder
 
 RUN apt-get update && apt-get install -y \
     build-essential \
+    ccache \
     cmake \
     git \
     libssl-dev \
@@ -28,14 +29,21 @@ WORKDIR /app
 COPY . .
 
 # Static-ish CPU build of llama-server (no GPU deps, portable across hosts).
-RUN cmake -S . -B build \
+# ccache lives in a BuildKit cache mount, so it persists across builds: the first build is a full
+# compile, every rebuild after only recompiles the translation units that actually changed
+# (near-instant even though `COPY . .` invalidates the layer). Needs BuildKit (default on 6.x).
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DGGML_NATIVE=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
     -DGGML_BACKEND_DL=OFF \
     -DGGML_CPU_ALL_VARIANTS=OFF \
     -DBUILD_SHARED_LIBS=OFF \
-    && cmake --build build --config Release -j$(nproc) --target llama-server
+    && cmake --build build --config Release -j$(nproc) --target llama-server \
+    && ccache --show-stats
 
 # ---------------------------------------------------------------------------
 # Stage 2: slim runtime. Precompiled binary + batch agent only — no model.
@@ -74,14 +82,19 @@ RUN chmod +x /app/agent.py /app/router.py
 # -> first *.gguf in the baked /app dir (only present if MODEL_URL was passed at build).
 ENV MODELS_DIR=/models
 ENV LOCAL_PORT=8081
-ENV CACHE_TYPE_K=f16
-ENV CACHE_TYPE_V=f16
+# TurboQuant ON by default: -fa on + q8_0 K-cache + turbo3 V-cache (6.4x V-cache compression).
+# Validated coherent (cold+warm) on the CPU-only image with Qwen2.5-1.5B-Instruct — this is the
+# whole point of mallana. Fall back to correctness-only with CACHE_TYPE_V=f16 FLASH_ATTN=off.
+ENV FLASH_ATTN=on
+ENV CACHE_TYPE_K=q8_0
+ENV CACHE_TYPE_V=turbo3
 ENV CTX_SIZE=2048
-ENV FLASH_ATTN=off
-ENV MAX_TOKENS=256
-ENV TEMPERATURE=0.7
-ENV FREQUENCY_PENALTY=0.3
-ENV PRESENCE_PENALTY=0.3
+# 768 leaves room for multi-step reasoning to finish (256 truncated math/explanation answers).
+ENV MAX_TOKENS=768
+# Low-but-nonzero temp for deterministic-ish tasks; penalties off (they distort exact-format asks).
+ENV TEMPERATURE=0.3
+ENV FREQUENCY_PENALTY=0.0
+ENV PRESENCE_PENALTY=0.0
 ENV PER_TASK_TIMEOUT=30
 ENV GLOBAL_DEADLINE=900
 ENV TASK_INPUT_PATH=/input/tasks.json

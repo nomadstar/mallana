@@ -188,15 +188,17 @@ has not yet been scheduled.
 | Weight + KV joint compression (TQ3_1S, TQ4_1S formats) | P4 | ⬜ Pending |
 | Cross-layer KV cache coordination | P4 | ⬜ Pending |
 | Benchmark automation and regression dashboard | P2 | ⬜ Pending |
-| Layer-wise inference / weight streaming (AirLLM-style) | P4 | ⬜ Pending |
+| Layer-wise inference / weight streaming (AirLLM-style) — run a model far larger than RAM by loading/freeing transformer layers on demand (trades latency for memory; not viable for time-boxed batch workloads like Track 1) | P4 | ⬜ Pending |
 | Prefetch-compute overlap for layer streaming | P4 | ⬜ Pending |
+| Retrieval-augmented inference (native RAG) — pair the on-device model with an embedded knowledge/document index it queries at generation time, so a small model punches above its weight on factual tasks (e.g. the Track 1 T01/T01c knowledge questions) without scaling parameters. Distinct from the dev-tooling codebase-memory-mcp entries below: this is retrieval **inside the product's inference path**, not agent code navigation | P4 | ⬜ Pending |
+| Self-indexing model artifacts — bake an embeddings index alongside the GGUF so a model ships with its own retrievable knowledge store | P4 | ⬜ Pending |
 
 ### Research OS Tooling
 
 | Task | Priority | Status |
 |---|---|---|
-| Integrate codebase-memory-mcp for agent code navigation | P3 | ⬜ Pending |
-| Persistent knowledge graph across multiswarm agent runs | P3 | ⬜ Pending |
+| Integrate codebase-memory-mcp for agent code navigation — mandatory for all three swarm models (agy/copilot/opencode) + orchestrator on this repo (project `home-ignatus-GitHub-mallana`, indexed) | P3 | ✅ |
+| Persistent knowledge graph across multiswarm agent runs | P3 | 🔄 In progress |
 
 ---
 

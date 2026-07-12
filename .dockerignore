@@ -12,6 +12,14 @@ build*/
 
 models/*
 
+# Heavy artifacts the C++ build does NOT need — these were ~1 GB of dead weight
+# slowing the build-context COPY. (build*/ already covers build-diag/.)
+**/node_modules/
+tools/server/tests/
+build-diag/
+*.bin
+*.log
+
 /llama-cli
 /llama-quantize
 

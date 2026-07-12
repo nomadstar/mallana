@@ -35,19 +35,19 @@ TASK_OUTPUT_PATH = os.environ.get("TASK_OUTPUT_PATH", "/output/results.json")
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "8081"))
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LOCAL_MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "")
-# Correctness-first defaults: Flash Attention is OFF and cache is f16. The fork's FA path
-# currently corrupts generation on this build (repetitive-gibberish), and TurboQuant V-cache
-# REQUIRES FA (its dequant happens inside the FA kernel) — so turbo is only usable once FA is
-# fixed. Set FLASH_ATTN=on + CACHE_TYPE_V=turbo3 to opt back into the compressed path.
-FLASH_ATTN = os.environ.get("FLASH_ATTN", "off")
-CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "f16")
-CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "f16")
+# TurboQuant defaults: Flash Attention ON with a q8_0 K-cache and a turbo3 V-cache (TurboQuant's
+# 6.4x-compressed value cache, dequantized inside the FA kernel). Validated coherent (cold and
+# warm) on the CPU-only image with Qwen2.5-1.5B-Instruct — this compressed path is mallana's whole
+# point. For a plain correctness-only baseline, set FLASH_ATTN=off + CACHE_TYPE_K=f16 CACHE_TYPE_V=f16.
+FLASH_ATTN = os.environ.get("FLASH_ATTN", "on")
+CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "q8_0")
+CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "turbo3")
 CTX_SIZE = os.environ.get("CTX_SIZE", "4096")
 NGL = os.environ.get("LLAMA_NGL", "99")
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0.3"))
-PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0.3"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "768"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
+FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0.0"))
+PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0.0"))
 
 # --- Timeout safety ---
 PER_TASK_TIMEOUT = float(os.environ.get("PER_TASK_TIMEOUT", "45"))       # seconds per task
