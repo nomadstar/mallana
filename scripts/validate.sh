@@ -97,6 +97,25 @@ else
 fi
 echo ""
 
+# Step 4: End-to-end generation smoke test.
+# The unit tests above only check codec math and single-forward-pass NMSE; this actually runs
+# the server and generates text, catching the "first request returns garbage" class of bug that
+# NMSE/speed tests miss. Gated on a .gguf being present in the repo root (skips in CI).
+echo -e "${BOLD}[4/4] End-to-end generation smoke test...${RESET}"
+SMOKE_MODEL="${GEN_SMOKE_MODEL:-$(ls -1 ./*.gguf 2>/dev/null | head -1)}"
+if [ -f "scripts/gen-smoke.sh" ] && [ -n "$SMOKE_MODEL" ] && [ -f "$SMOKE_MODEL" ]; then
+    if MODEL="$SMOKE_MODEL" bash scripts/gen-smoke.sh; then
+        echo -e "  ${GREEN}PASS: generation is coherent.${RESET}"
+    else
+        echo -e "  ${RED}FAIL: generation smoke test failed (garbage/incoherent output).${RESET}"
+        FAIL=1
+    fi
+else
+    echo -e "${YELLOW}Warning: no .gguf model in repo root — skipping generation smoke test.${RESET}"
+    echo -e "Place a small model (e.g. a *.gguf) in the repo root to enable it."
+fi
+echo ""
+
 echo -e "${BOLD}${BLUE}================================================================${RESET}"
 if [ "$FAIL" -eq 0 ]; then
     echo -e "  ${BOLD}${GREEN}ALL VALIDATION TESTS PASSED${RESET}"

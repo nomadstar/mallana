@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Multi-Agent Orchestrator (Multiswarm) for llama-cpp-turboquant.
-Orchestrates agy (Gemini/Antigravity), claude (Claude Code), and opencode
-to iteratively plan, implement, validate, and critique codebase improvements.
+Orchestrates agy (Gemini/Antigravity), a configurable implementer (copilot by
+default; claude or agy also supported), and opencode to iteratively plan,
+implement, validate, and critique codebase improvements.
 
 Roles:
 - Architect (agy): High context capacity, designs the plan.
-- Implementer (claude): High precision code edits, writes the code.
+- Implementer (copilot by default; --implementer claude|agy|copilot): writes the code.
 - Verifier/Critic (opencode): Reviews the diff and test logs, provides critique.
 """
 
@@ -35,6 +36,7 @@ PLAN_FILE = ".multiswarm_plan.md"
 SUMMARY_FILE = ".multiswarm_summary.md"
 CRITIQUE_FILE = ".multiswarm_critique.md"
 AUDIT_FILE = ".multiswarm_audit.md"
+RECON_FILE = ".multiswarm_recon.md"
 VALIDATION_LOG = ".multiswarm_validation.log"
 HISTORY_LOG = ".multiswarm_history.log"
 
@@ -48,13 +50,15 @@ BUILD_POLL_INTERVAL = 3  # seconds between /proc scans for live build/compile jo
 # reminded of this so none of them burns its budget re-discovering the codebase
 # with brute-force search.
 CODEBASE_MEMORY_HINT = (
-    "NOTE ON SEARCH COST: this repository is a large llama.cpp fork — brute-force grep/find "
-    "across it is expensive. If you have access to the `codebase-memory-mcp` MCP tools "
-    "(search_graph, trace_path, get_code_snippet, search_code, get_architecture, query_graph) "
-    "for the project 'home-ignatus-GitHub-mallana', prefer them over raw grep for locating "
-    "functions, tracing call chains (who calls X / what does X call), and understanding "
-    "structure — they return precise results at a fraction of the token cost. Fall back to "
-    "grep/Read only for text search, configs, or non-code files."
+    "MANDATORY — CODE NAVIGATION FOR THIS REPO: this is a large llama.cpp fork already indexed in "
+    "the `codebase-memory-mcp` knowledge graph as project 'home-ignatus-GitHub-mallana' (37k+ "
+    "nodes, 155k+ edges). You MUST use its MCP tools as your PRIMARY means of navigating code: "
+    "search_graph (find functions/classes/routes), trace_path (callers/callees & data flow — e.g. "
+    "trace the llama_decode / first-ubatch path), get_code_snippet (read a symbol by "
+    "qualified_name), search_code (graph-augmented grep), get_architecture, query_graph (Cypher, "
+    "incl. complexity/hot-path metrics). Do NOT brute-force grep/find across the tree — it is slow "
+    "and token-expensive here, and it is the wrong tool. Fall back to grep/Read ONLY for plain "
+    "text, configs, or non-code files. Always pass project='home-ignatus-GitHub-mallana'."
 )
 
 # agy's own `--print` mode has a hardcoded 5-minute default wait (`--print-timeout`,
@@ -178,12 +182,15 @@ def log_session(message):
     with open(HISTORY_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
 
-def run_with_output(cmd, prefix="", print_func=print, log_file=None):
+def run_with_output(cmd, prefix="", print_func=print, log_file=None, timeout=None):
     """Run a command streaming stdout/stderr in real time with a heartbeat.
 
     Prints a status line every HEARTBEAT_INTERVAL seconds when the subprocess
     produces no output, so the operator can tell it is still alive.
     Optionally tee's output to log_file (an open file object).
+    If timeout (seconds) is set, the process is terminated once wall-clock
+    elapsed exceeds it — used to bound a flaky, non-blocking helper (e.g. agy
+    recon) so a hang cannot stall the pipeline.
     Returns the Popen object (with .returncode set).
     """
     process = subprocess.Popen(
@@ -238,6 +245,18 @@ def run_with_output(cmd, prefix="", print_func=print, log_file=None):
                     f"{elapsed:.0f}s elapsed, last output {silence:.0f}s ago{RESET}",
                     flush=True,
                 )
+
+            if timeout is not None and (time.monotonic() - start) > timeout:
+                print_func(
+                    f"{prefix_str}{RED}⏱ timeout ({timeout:.0f}s) exceeded — terminating "
+                    f"(non-blocking helper; pipeline continues).{RESET}",
+                    flush=True,
+                )
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                break
 
     hb = threading.Thread(target=heartbeat, daemon=True)
     hb.start()
@@ -370,8 +389,57 @@ def run_planning(task, iteration, critique=None, model=None, skip_permissions=Fa
         print(f"{RED}Architect planning failed with return code {res.returncode}.{RESET}")
         return False
 
+def run_recon(task, model=None, skip_permissions=False, timeout=300):
+    """Phase 0 (optional): agy does a READ-ONLY reconnaissance pass.
+
+    agy has high context capacity but is unreliable at synchronous execution (it tends to launch
+    builds and hang). So it is used here purely as an advisory analyst: read the code, rank the
+    likely root-cause sites, and hand the implementer a head start via RECON_FILE. This is
+    strictly NON-BLOCKING — it is bounded by `timeout` and, if it produces nothing, the pipeline
+    proceeds without it. It must never gate the run.
+    """
+    prompt = (
+        f"You are the RECON ANALYST (Gemini/Antigravity — high context capacity). The team will "
+        f"implement this task: '{task}'.\n"
+        f"{CODEBASE_MEMORY_HINT}\n"
+        f"Do a strictly READ-ONLY reconnaissance pass to give the implementer a head start. "
+        f"CRITICAL: you MUST NOT run builds, tests, or ANY shell command that compiles or executes "
+        f"code — only read files and reason. Do NOT background commands or end your turn to wait. "
+        f"In a SINGLE turn, write '{RECON_FILE}' (markdown) with:\n"
+        f"1. Ranked most-likely root-cause locations (file:line) with a one-line rationale each.\n"
+        f"2. The key code excerpts the implementer needs (so it need not re-search).\n"
+        f"3. How the relevant code likely differs from upstream llama.cpp.\n"
+        f"4. Concrete first steps for the fix.\n"
+        f"Be concise and specific. You MUST write '{RECON_FILE}' before ending your turn."
+    )
+    cmd = ["agy"]
+    if skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
+    if model:
+        cmd.extend(["--model", model])
+    # Short print-timeout AND a hard wall-clock timeout below — agy must not stall the run.
+    cmd.extend(["--print-timeout", "5m", "--prompt", prompt])
+
+    print(f"\n{BOLD}{CYAN}=== Phase 0: Reconnaissance with agy (read-only, non-blocking) ==={RESET}")
+    print(f"Executing: {format_cmd_display(cmd)}")
+    log_session(f"Starting recon pass (timeout={timeout}s)")
+
+    try:
+        res = run_with_output(cmd, prefix="RECON", timeout=timeout)
+    except Exception as e:
+        print(f"{YELLOW}Recon pass errored ({e}); proceeding without it.{RESET}")
+        return False
+
+    if res.returncode == 0 and os.path.exists(RECON_FILE) and os.path.getsize(RECON_FILE) > 0:
+        print(f"{GREEN}✔ Recon notes written to '{RECON_FILE}'.{RESET}")
+        return True
+    print(f"{YELLOW}Recon produced no usable notes (timeout/hang/empty); "
+          f"proceeding without it — this never blocks the pipeline.{RESET}")
+    return False
+
+
 def run_implementation(task, iteration, model=None, skip_permissions=False, resume=False, implementer="claude",
-                        agy_print_timeout=AGY_PRINT_TIMEOUT_DEFAULT):
+                        agy_print_timeout=AGY_PRINT_TIMEOUT_DEFAULT, impl_timeout=None):
     """Phase 2: Implementer writes code changes based on the plan."""
     if not os.path.exists(PLAN_FILE):
         print(f"{RED}Error: Plan file '{PLAN_FILE}' not found!{RESET}")
@@ -385,12 +453,24 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
         with open(CRITIQUE_FILE, "r") as f:
             critique_content = f.read()
 
+    recon_content = ""
+    if os.path.exists(RECON_FILE):
+        with open(RECON_FILE, "r") as f:
+            recon_content = f.read()
+
     prompt = (
         f"You are the IMPLEMENTER ({implementer}). Your task is to execute the implementation plan.\n"
         f"{CODEBASE_MEMORY_HINT}\n"
         f"Here is the plan:\n"
         f"```markdown\n{plan_content}\n```\n"
     )
+    if recon_content:
+        prompt += (
+            f"A read-only RECON ANALYST produced these advisory notes (suspected root-cause sites, "
+            f"code excerpts, upstream-diff hints). Use them as a head start to avoid re-searching, "
+            f"but VERIFY before trusting them — they are hints, not ground truth:\n"
+            f"```markdown\n{recon_content}\n```\n"
+        )
     if critique_content:
         prompt += (
             f"IMPORTANT: The previous attempt failed validation. Here is the feedback/errors:\n"
@@ -401,6 +481,15 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
         f"Please perform the required file edits/creations to implement the plan. "
         f"When you are finished, write a short summary of the files modified and changes made "
         f"to '{SUMMARY_FILE}' (e.g. 'Modified src/main.cpp to support X').\n"
+        f"NEVER run interactive or stdin-blocking commands from your shell — they hang your turn "
+        f"forever with no way to recover, and nothing can unblock you. In particular: do NOT run "
+        f"`llama-cli` in conversation/chat mode (the `-cnv` flag), and do NOT start any REPL, "
+        f"pager, editor, or a foreground server you then wait on. To exercise TEXT GENERATION, run "
+        f"`MODEL=<model.gguf> bash scripts/gen-smoke.sh` — it starts a server, sends NON-interactive "
+        f"requests, checks the output is coherent, and cleans up for you; use it instead of driving "
+        f"`llama-cli`/`llama-server` by hand. If you must invoke a model binary directly, you MUST "
+        f"pass non-interactive flags (`-no-cnv`, `--simple-io`) AND redirect stdin from /dev/null "
+        f"(append `< /dev/null`), and never leave a server running.\n"
         f"CRITICAL: This is a single non-interactive turn (headless/print mode) — there is no "
         f"follow-up turn, scheduled wakeup, or notification that will ever resume you after this "
         f"response ends. Do NOT background a build/test/long-running command and then end your "
@@ -415,21 +504,30 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
         f"actually returned should you write '{SUMMARY_FILE}' and end your turn."
     )
 
-    # agy uses --prompt; claude uses --print
-    if implementer == "agy":
-        prompt_flag = "--prompt"
-    else:
+    # Per-tool CLI conventions:
+    #   claude  : --print <prompt>  , auto-approve via --dangerously-skip-permissions
+    #   agy     : --prompt <prompt> , auto-approve via --dangerously-skip-permissions, --print-timeout
+    #   copilot : --prompt <prompt> , auto-approve via --allow-all (tools+paths+urls; required
+    #             for non-interactive mode so it can edit files and run commands unattended)
+    if implementer == "claude":
         prompt_flag = "--print"
+    else:
+        prompt_flag = "--prompt"
 
     cmd = [implementer]
     if skip_permissions:
-        cmd.append("--dangerously-skip-permissions")
+        if implementer == "copilot":
+            cmd.append("--allow-all")
+        else:
+            cmd.append("--dangerously-skip-permissions")
     if model:
         cmd.extend(["--model", model])
     if resume and iteration > 1:
         cmd.append("--continue")
     if implementer == "agy":
         cmd.extend(["--print-timeout", agy_print_timeout])
+    if implementer == "copilot":
+        cmd.append("--no-color")
 
     cmd.extend([prompt_flag, prompt])
 
@@ -437,7 +535,7 @@ def run_implementation(task, iteration, model=None, skip_permissions=False, resu
     print(f"Executing: {format_cmd_display(cmd)}")
     log_session(f"Starting implementation phase, iteration {iteration}")
 
-    res = run_with_output(cmd, prefix="CLAUDE")
+    res = run_with_output(cmd, prefix=implementer.upper(), timeout=impl_timeout)
     if res.returncode != 0:
         return False
     if not os.path.exists(SUMMARY_FILE) or os.path.getsize(SUMMARY_FILE) == 0:
@@ -759,8 +857,19 @@ def main():
     parser.add_argument("--continue-session", action="store_true", help="Continue previous CLI sessions if possible")
     parser.add_argument("--use-plan", action="store_true", help="Use existing .multiswarm_plan.md without running Architect planning")
     parser.add_argument("--force-use-plan", action="store_true", help="Use existing plan even if its task field does not match --task")
-    parser.add_argument("--implementer", default="claude", choices=["claude", "agy"],
-                        help="Tool used as implementer in Phase 2 (default: claude)")
+    parser.add_argument("--implementer", default="copilot", choices=["claude", "agy", "copilot"],
+                        help="Tool used as implementer in Phase 2 (default: copilot)")
+    parser.add_argument("--recon", action="store_true",
+                        help="Phase 0: run a read-only agy reconnaissance pass before implementation "
+                             "(high context; non-blocking, bounded by --recon-timeout). Its notes seed "
+                             "the implementer. A hang/timeout never stalls the run.")
+    parser.add_argument("--recon-timeout", type=int, default=300,
+                        help="Hard wall-clock timeout (seconds) for the --recon pass (default: 300)")
+    parser.add_argument("--impl-timeout", type=int, default=1800,
+                        help="Hard wall-clock timeout (seconds) for the implementer phase — a safety "
+                             "net so a hang (e.g. the implementer launching an interactive command "
+                             "that blocks on stdin) self-terminates instead of stalling forever. "
+                             "Generous enough for a real edit+build. Set 0 to disable (default: 1800)")
     parser.add_argument("--agy-print-timeout", default=AGY_PRINT_TIMEOUT_DEFAULT,
                         help=f"agy --print-timeout value for planning/implementation phases "
                              f"(agy's own hardcoded default is 5m, too short for builds; default here: {AGY_PRINT_TIMEOUT_DEFAULT})")
@@ -819,7 +928,7 @@ def main():
 
     # Validate that CLI tools are installed
     missing_tools = []
-    for tool in ["agy", "claude", "opencode"]:
+    for tool in ["agy", args.implementer, "opencode"]:
         if not check_cli_tool(tool):
             missing_tools.append(tool)
 
@@ -839,7 +948,7 @@ def main():
     print(f"{BOLD}{GREEN}================================================================{RESET}\n")
 
     # Clear old temporary files from previous runs
-    for f in [SUMMARY_FILE, CRITIQUE_FILE, VALIDATION_LOG]:
+    for f in [SUMMARY_FILE, CRITIQUE_FILE, VALIDATION_LOG, RECON_FILE]:
         if os.path.exists(f):
             os.remove(f)
 
@@ -886,6 +995,10 @@ def main():
 
     log_session(f"New multiswarm task initiated: {args.task}")
 
+    # Phase 0 (optional): read-only recon by agy to seed the implementer. Non-blocking.
+    if args.recon:
+        run_recon(args.task, args.model_agy, args.skip_permissions, args.recon_timeout)
+
     success = False
     for iteration in range(1, args.iterations + 1):
         print(f"\n{BOLD}{YELLOW}>>> STARTING ITERATION {iteration} of {args.iterations} <<<{RESET}")
@@ -917,9 +1030,9 @@ def main():
                 break
 
         # Step 2: Implementation
-        impl_model = args.model_implementer or (None if args.implementer == "agy" else args.model_claude)
+        impl_model = args.model_implementer or (args.model_claude if args.implementer == "claude" else None)
         if not run_implementation(args.task, iteration, impl_model, args.skip_permissions, args.continue_session, args.implementer,
-                                   args.agy_print_timeout):
+                                   args.agy_print_timeout, args.impl_timeout or None):
             print(f"{RED}Implementation failed in iteration {iteration}. Aborting.{RESET}")
             break
 
