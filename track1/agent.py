@@ -35,13 +35,13 @@ TASK_OUTPUT_PATH = os.environ.get("TASK_OUTPUT_PATH", "/output/results.json")
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "8081"))
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 LOCAL_MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "")
-# TurboQuant defaults: Flash Attention ON with a q8_0 K-cache and a turbo3 V-cache (TurboQuant's
-# 6.4x-compressed value cache, dequantized inside the FA kernel). Validated coherent (cold and
-# warm) on the CPU-only image with Qwen2.5-1.5B-Instruct — this compressed path is mallana's whole
-# point. For a plain correctness-only baseline, set FLASH_ATTN=off + CACHE_TYPE_K=f16 CACHE_TYPE_V=f16.
-FLASH_ATTN = os.environ.get("FLASH_ATTN", "on")
-CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "q8_0")
-CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "turbo3")
+# Correctness-first defaults: f16 KV cache, no Flash Attention. On a small model that fits RAM,
+# TurboQuant's compressed V-cache buys no accuracy (its win is memory — fitting bigger models /
+# longer context), so the accuracy-gated submission ships uncompressed. TurboQuant is validated and
+# is the showcase for GPU/large-model runs; opt in with FLASH_ATTN=on CACHE_TYPE_K=q8_0 CACHE_TYPE_V=turbo3.
+FLASH_ATTN = os.environ.get("FLASH_ATTN", "off")
+CACHE_TYPE_K = os.environ.get("CACHE_TYPE_K", "f16")
+CACHE_TYPE_V = os.environ.get("CACHE_TYPE_V", "f16")
 CTX_SIZE = os.environ.get("CTX_SIZE", "4096")
 NGL = os.environ.get("LLAMA_NGL", "99")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "768"))

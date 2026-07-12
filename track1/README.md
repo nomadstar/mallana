@@ -36,9 +36,10 @@ The scorer runs the container as a **batch agent** (dependency-free, Python stdl
 - reads tasks from `TASK_INPUT_PATH` (default `/input/tasks.json`) — a JSON array of
   `{"task_id": str, "prompt": str}`;
 - answers each task on-device with mallana's `llama-server`, **0 Fireworks tokens**. The shipped
-  defaults enable **TurboQuant** (`-fa on --cache-type-k q8_0 --cache-type-v turbo3`) — the
-  6.4×-compressed value cache, validated coherent on the CPU-only image. For a plain baseline set
-  `FLASH_ATTN=off CACHE_TYPE_K=f16 CACHE_TYPE_V=f16`;
+  defaults are correctness-first (`-fa off --cache-type-k f16 --cache-type-v f16`) — on a small
+  model that fits RAM, TurboQuant's compressed cache buys accuracy nothing (its win is *memory*,
+  for bigger models / longer context). **TurboQuant** is validated and is the showcase for
+  GPU/large-model runs; enable it with `FLASH_ATTN=on CACHE_TYPE_K=q8_0 CACHE_TYPE_V=turbo3`;
 - writes `TASK_OUTPUT_PATH` (default `/output/results.json`) — a JSON array of
   `{"task_id": str, "answer": str}`, task IDs preserved exactly.
 
@@ -53,31 +54,22 @@ accuracy gate.
 
 ## Run it
 
-The published image is **precompiled and model-agnostic**: the `llama.cpp` build happens once at
-push time (never during evaluation), and **no model is baked in** — so the image pulls fast and
-you choose which GGUF to run. Mount a directory containing your `.gguf` at `/models`:
+The published image is **precompiled and self-contained**: the `llama.cpp` build happens once at
+push time (never during evaluation) and a general-purpose instruct model
+([Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF)) is **baked in**,
+so the scorer can just pull and run — no model to provide, no runtime download:
 
 ```bash
 docker pull ghcr.io/nomadstar/mallana:track1-latest
 docker run \
-  -v "$PWD/models:/models" \
   -v "$PWD/input:/input" \
   -v "$PWD/output:/output" \
   ghcr.io/nomadstar/mallana:track1-latest
 ```
 
-The agent picks the first `*.gguf` under `/models` (or set `LOCAL_MODEL_PATH` to an exact file).
-A small instruct model such as
-[`qwen2.5-1.5b-instruct-q4_k_m.gguf`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF)
-runs comfortably on CPU; TurboQuant's compressed V-cache leaves headroom for larger models.
-
-**Self-contained image (optional, for offline testing)** — bake a model at build time:
-
-```bash
-docker build -f track1/Dockerfile -t mallana-agent \
-  --build-arg MODEL_URL=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf .
-docker run -v "$PWD/input:/input" -v "$PWD/output:/output" mallana-agent
-```
+To run a **different** model, mount a directory containing your `.gguf` at `/models` (it takes
+precedence over the baked model) or set `LOCAL_MODEL_PATH` to an exact file. Rebuild with a
+different baked model via `--build-arg MODEL_URL=…`.
 
 **Directly against a local build:**
 
@@ -98,9 +90,9 @@ For interactive use, `router.py` exposes the same local model over an OpenAI-com
 |---|---|---|
 | `MODELS_DIR` | `/models` | Dir scanned for a `*.gguf` when `LOCAL_MODEL_PATH` is unset |
 | `LOCAL_MODEL_PATH` | *(unset)* | Exact path to the GGUF served locally (overrides `MODELS_DIR`) |
-| `CACHE_TYPE_K` | `q8_0` | K cache type (`f16` for uncompressed) |
-| `CACHE_TYPE_V` | `turbo3` | V cache type — TurboQuant 6.4× compression (`f16` for uncompressed) |
-| `FLASH_ATTN` | `on` | Flash Attention (required by TurboQuant's compressed V-cache) |
+| `CACHE_TYPE_K` | `f16` | K cache type (`q8_0` to compress) |
+| `CACHE_TYPE_V` | `f16` | V cache type (`turbo3` for TurboQuant 6.4× compression, needs `-fa on`) |
+| `FLASH_ATTN` | `off` | Flash Attention (`on` to enable TurboQuant's compressed V-cache) |
 | `MAX_TOKENS` | `768` | Max generated tokens per task |
 | `TEMPERATURE` | `0.3` | Sampling temperature |
 | `CTX_SIZE` | `2048` | Context window |

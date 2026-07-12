@@ -46,7 +46,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     && ccache --show-stats
 
 # ---------------------------------------------------------------------------
-# Stage 2: slim runtime. Precompiled binary + batch agent only — no model.
+# Stage 2: runtime. Precompiled binary + batch agent + a baked instruct model
+# (self-contained: the scorer does not mount a model).
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm
 
@@ -61,16 +62,13 @@ WORKDIR /app
 # Precompiled llama-server (statically linked) — instant start, no build at eval time.
 COPY --from=builder /app/build/bin/llama-server /app/llama-server
 
-# OPTIONAL self-contained model bake, OFF by default. The evaluation image ships WITHOUT a model
-# (the scorer mounts one at /models). For a self-contained local-test image, pass a URL:
-#   docker build --build-arg MODEL_URL=https://.../qwen2.5-1.5b-instruct-q4_k_m.gguf ...
-ARG MODEL_URL=""
-RUN if [ -n "$MODEL_URL" ]; then \
-        echo "Baking model from $MODEL_URL" && \
-        curl -L -o /app/model.gguf "$MODEL_URL"; \
-    else \
-        echo "No MODEL_URL: shipping model-agnostic (evaluator mounts /models)."; \
-    fi
+# Bake a general-purpose instruct model into the image — the scorer does NOT mount a model, so the
+# submission MUST be self-contained (a model-less image produces empty answers → 0% accuracy gate).
+# Qwen2.5-1.5B-Instruct (Apache-2.0): capable on general tasks yet small/fast enough to stay well
+# within the CPU per-task time budget (a 3B times out on CPU). If the scorer DOES mount /models, that
+# takes precedence (agent.py resolves /models first, then this baked /app/model.gguf as the fallback).
+ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+RUN echo "Baking model from $MODEL_URL" && curl -L --fail -o /app/model.gguf "$MODEL_URL"
 
 # Batch agent (the Track 1 contract entrypoint) + optional live-server alternative.
 COPY track1/agent.py /app/agent.py
@@ -82,12 +80,13 @@ RUN chmod +x /app/agent.py /app/router.py
 # -> first *.gguf in the baked /app dir (only present if MODEL_URL was passed at build).
 ENV MODELS_DIR=/models
 ENV LOCAL_PORT=8081
-# TurboQuant ON by default: -fa on + q8_0 K-cache + turbo3 V-cache (6.4x V-cache compression).
-# Validated coherent (cold+warm) on the CPU-only image with Qwen2.5-1.5B-Instruct — this is the
-# whole point of mallana. Fall back to correctness-only with CACHE_TYPE_V=f16 FLASH_ATTN=off.
-ENV FLASH_ATTN=on
-ENV CACHE_TYPE_K=q8_0
-ENV CACHE_TYPE_V=turbo3
+# Correctness-first for the accuracy gate: f16 KV cache, no FA. On a 1.5B model that fits RAM easily,
+# TurboQuant's compressed V-cache (turbo3) buys no accuracy — its value is fitting BIGGER models / longer
+# context in less memory, which this small-model-on-CPU submission isn't bound by. TurboQuant is validated
+# and is the showcase for GPU/large-model runs; enable it here with FLASH_ATTN=on CACHE_TYPE_V=turbo3.
+ENV FLASH_ATTN=off
+ENV CACHE_TYPE_K=f16
+ENV CACHE_TYPE_V=f16
 ENV CTX_SIZE=2048
 # 768 leaves room for multi-step reasoning to finish (256 truncated math/explanation answers).
 ENV MAX_TOKENS=768
