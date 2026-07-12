@@ -85,8 +85,10 @@ def resolve_server_bin():
 def resolve_model():
     if LOCAL_MODEL_PATH and os.path.exists(LOCAL_MODEL_PATH):
         return LOCAL_MODEL_PATH
-    # Otherwise pick the first .gguf under MODELS_DIR, then the repo root.
-    search_dirs = [MODELS_DIR, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    # Otherwise pick the first .gguf under MODELS_DIR (evaluator's mount), then the agent's own
+    # dir (an optionally baked /app/model.gguf), then the repo root (local dev).
+    here = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = [MODELS_DIR, here, os.path.dirname(here)]
     for d in search_dirs:
         if not os.path.isdir(d):
             continue

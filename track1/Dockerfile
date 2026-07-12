@@ -1,4 +1,19 @@
-# Stage 1: Build llama.cpp (CPU only)
+# syntax=docker/dockerfile:1
+#
+# Track 1 submission image — PULL-AND-RUN, model-agnostic.
+#
+# The evaluator PULLS this prebuilt image (ghcr.io/nomadstar/mallana:track1-latest) and mounts
+# their own model, so:
+#   - The llama.cpp compile happens HERE at push time, never during evaluation.
+#   - NO model is baked in (that was ~1 GB of dead weight slowing the pull). The evaluator
+#     mounts a model dir at /models (or sets LOCAL_MODEL_PATH); agent.py picks it up.
+# Net effect: a small image that pulls fast and a batch agent that exits promptly — no build,
+# no runtime download, nothing left hanging.
+
+# ---------------------------------------------------------------------------
+# Stage 1: build llama-server (CPU-only). Runs at push time on the maintainer's
+# machine — its cost never counts against the evaluation runtime limit.
+# ---------------------------------------------------------------------------
 FROM ubuntu:22.04 AS builder
 
 RUN apt-get update && apt-get install -y \
@@ -12,7 +27,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY . .
 
-# Build CPU-only version of llama-server (fast build, no GPU dependencies)
+# Static-ish CPU build of llama-server (no GPU deps, portable across hosts).
 RUN cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_NATIVE=OFF \
@@ -22,7 +37,9 @@ RUN cmake -S . -B build \
     -DBUILD_SHARED_LIBS=OFF \
     && cmake --build build --config Release -j$(nproc) --target llama-server
 
-# Stage 2: Final lightweight runtime image
+# ---------------------------------------------------------------------------
+# Stage 2: slim runtime. Precompiled binary + batch agent only — no model.
+# ---------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,29 +50,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy the statically compiled llama-server
+# Precompiled llama-server (statically linked) — instant start, no build at eval time.
 COPY --from=builder /app/build/bin/llama-server /app/llama-server
 
-# Bake in a general-purpose instruct model during build (instant start, no runtime downloads).
-# Qwen2.5-1.5B-Instruct (Apache-2.0) — a real capability jump over the old 0.5B coder model for
-# a general-purpose agent, still small enough to stay responsive on CPU. Overridable at build
-# time (e.g. --build-arg MODEL_URL=.../qwen2.5-3b-instruct-q4_k_m.gguf) since TurboQuant's
-# compressed V-cache leaves headroom for a larger model on capable hardware.
-ARG MODEL_URL=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
-RUN curl -L -o /app/model.gguf "${MODEL_URL}"
+# OPTIONAL self-contained model bake, OFF by default. The evaluation image ships WITHOUT a model
+# (the scorer mounts one at /models). For a self-contained local-test image, pass a URL:
+#   docker build --build-arg MODEL_URL=https://.../qwen2.5-1.5b-instruct-q4_k_m.gguf ...
+ARG MODEL_URL=""
+RUN if [ -n "$MODEL_URL" ]; then \
+        echo "Baking model from $MODEL_URL" && \
+        curl -L -o /app/model.gguf "$MODEL_URL"; \
+    else \
+        echo "No MODEL_URL: shipping model-agnostic (evaluator mounts /models)."; \
+    fi
 
-# Copy the batch agent (submission entrypoint) and the local server it drives.
-# agent.py is the Track 1 contract: reads TASK_INPUT_PATH, writes TASK_OUTPUT_PATH.
-# router.py is kept as an optional live-server alternative for interactive use.
+# Batch agent (the Track 1 contract entrypoint) + optional live-server alternative.
 COPY track1/agent.py /app/agent.py
 COPY track1/router.py /app/router.py
 RUN chmod +x /app/agent.py /app/router.py
 
-# Env vars — all local. TurboQuant KV compression on by default. Answering on-device costs
-# ZERO Fireworks tokens (the optimal token score); the agent only escalates to Fireworks if
-# ENABLE_FIREWORKS_FALLBACK is set and the local model fails a task.
+# --- Runtime config (all local, zero Fireworks tokens by default) ---
+# Model resolution order in agent.py: LOCAL_MODEL_PATH -> first *.gguf in MODELS_DIR (/models)
+# -> first *.gguf in the baked /app dir (only present if MODEL_URL was passed at build).
+ENV MODELS_DIR=/models
 ENV LOCAL_PORT=8081
-ENV LOCAL_MODEL_PATH=/app/model.gguf
 ENV CACHE_TYPE_K=f16
 ENV CACHE_TYPE_V=f16
 ENV CTX_SIZE=2048
@@ -69,6 +87,5 @@ ENV GLOBAL_DEADLINE=900
 ENV TASK_INPUT_PATH=/input/tasks.json
 ENV TASK_OUTPUT_PATH=/output/results.json
 
-# The scorer runs the container, mounts /input, and reads /output before the runtime limit.
+# The scorer mounts /input (+ a model), runs the container, reads /output, then it exits.
 ENTRYPOINT ["python3", "/app/agent.py"]
-
