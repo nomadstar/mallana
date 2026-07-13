@@ -481,106 +481,23 @@ static __global__ void flash_attn_ext_vec(
                 if (dominated) { continue; }
             }
 
-            if constexpr (type_V == GGML_TYPE_TURBO3_0) {
-                const block_turbo3_0 * vb = (const block_turbo3_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[8];
-
+            if constexpr (V_is_turbo) {
+                half2 tmp[V_rows_per_thread/2];
+                const void * vb = v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
 #pragma unroll
                 for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                     const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO3;
-                    const int j0 = i0 % QK_TURBO3;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 8; ++c) { sc[c] = TURBO_CENTROIDS_3BIT[c] * norm; }
+                    if constexpr (type_V == GGML_TYPE_TURBO3_0) {
+                        dequantize_V_turbo3_0<half, V_rows_per_thread>(vb, tmp, i0);
+                    } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+                        dequantize_V_turbo2_0<half, V_rows_per_thread>(vb, tmp, i0);
+                    } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
+                        dequantize_V_turbo4_0<half, V_rows_per_thread>(vb, tmp, i0);
                     }
-
-                    const uint8_t qs_byte  = vb[ib].qs[j0 / 4];
-                    const uint8_t sgn_byte = vb[ib].signs[j0 / 8];
-                    const int     shift_s  = j0 % 8;
-
-                    const uint8_t idx0 = ((qs_byte >> 0) & 0x3) | (((sgn_byte >> (shift_s+0)) & 0x1) << 2);
-                    const uint8_t idx1 = ((qs_byte >> 2) & 0x3) | (((sgn_byte >> (shift_s+1)) & 0x1) << 2);
-                    const uint8_t idx2 = ((qs_byte >> 4) & 0x3) | (((sgn_byte >> (shift_s+2)) & 0x1) << 2);
-                    const uint8_t idx3 = ((qs_byte >> 6) & 0x3) | (((sgn_byte >> (shift_s+3)) & 0x1) << 2);
-
 #pragma unroll
                     for (int j = 0; j < ncols; ++j) {
-                        half2 val0 = make_half2(__float2half(sc[idx0]), __float2half(sc[idx1]));
-                        half2 val1 = make_half2(__float2half(sc[idx2]), __float2half(sc[idx3]));
-                        VKQ[j][i_VKQ_0/nthreads_V + 0] += val0*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1] += val1*KQ_k[j];
-                    }
-                }
-            } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
-                const block_turbo2_0 * vb = (const block_turbo2_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[4];
-
-#pragma unroll
-                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
-                    const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO2;
-                    const int j0 = i0 % QK_TURBO2;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 4; ++c) { sc[c] = TURBO_CENTROIDS_2BIT[c] * norm; }
-                    }
-
-                    const uint8_t qs_byte = vb[ib].qs[j0 / 4];
-
-                    const uint8_t idx0 = (qs_byte >> 0) & 0x3;
-                    const uint8_t idx1 = (qs_byte >> 2) & 0x3;
-                    const uint8_t idx2 = (qs_byte >> 4) & 0x3;
-                    const uint8_t idx3 = (qs_byte >> 6) & 0x3;
-
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        half2 val0 = make_half2(__float2half(sc[idx0]), __float2half(sc[idx1]));
-                        half2 val1 = make_half2(__float2half(sc[idx2]), __float2half(sc[idx3]));
-                        VKQ[j][i_VKQ_0/nthreads_V + 0] += val0*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1] += val1*KQ_k[j];
-                    }
-                }
-            } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
-                const block_turbo4_0 * vb = (const block_turbo4_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[16];
-
-#pragma unroll
-                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
-                    const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO4;
-                    const int j0 = i0 % QK_TURBO4;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 16; ++c) { sc[c] = TURBO_CENTROIDS_4BIT[c] * norm; }
-                    }
-
-                    const uint8_t qs_byte0 = vb[ib].qs[j0 / 2];
-                    const uint8_t qs_byte1 = vb[ib].qs[j0 / 2 + 1];
-
-                    const uint8_t idx0 = (qs_byte0 >> 0) & 0xF;
-                    const uint8_t idx1 = (qs_byte0 >> 4) & 0xF;
-                    const uint8_t idx2 = (qs_byte1 >> 0) & 0xF;
-                    const uint8_t idx3 = (qs_byte1 >> 4) & 0xF;
-
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        half2 val0 = make_half2(__float2half(sc[idx0]), __float2half(sc[idx1]));
-                        half2 val1 = make_half2(__float2half(sc[idx2]), __float2half(sc[idx3]));
-                        VKQ[j][i_VKQ_0/nthreads_V + 0] += val0*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1] += val1*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 0] += tmp[0]*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 1] += tmp[1]*KQ_k[j];
                     }
                 }
             } else {
@@ -629,106 +546,25 @@ static __global__ void flash_attn_ext_vec(
             // Turbo V path: precompute scaled centroids once per block to eliminate
             // per-element norm multiply.  centroid[idx]*norm is computed 8/4/16 times
             // (once per centroid) instead of D times (once per element).
-            if constexpr (type_V == GGML_TYPE_TURBO3_0) {
-                const block_turbo3_0 * vb = (const block_turbo3_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[8];
-
+            if constexpr (V_is_turbo) {
+                float2 tmp[V_rows_per_thread/2];
+                const void * vb = v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
 #pragma unroll
                 for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                     const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO3;
-                    const int j0 = i0 % QK_TURBO3;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 8; ++c) { sc[c] = TURBO_CENTROIDS_3BIT[c] * norm; }
+                    if constexpr (type_V == GGML_TYPE_TURBO3_0) {
+                        dequantize_V_turbo3_0<float, V_rows_per_thread>(vb, tmp, i0);
+                    } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+                        dequantize_V_turbo2_0<float, V_rows_per_thread>(vb, tmp, i0);
+                    } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
+                        dequantize_V_turbo4_0<float, V_rows_per_thread>(vb, tmp, i0);
                     }
-
-                    const uint8_t qs_byte  = vb[ib].qs[j0 / 4];
-                    const uint8_t sgn_byte = vb[ib].signs[j0 / 8];
-                    const int     shift_s  = j0 % 8;
-
-                    const uint8_t idx0 = ((qs_byte >> 0) & 0x3) | (((sgn_byte >> (shift_s+0)) & 0x1) << 2);
-                    const uint8_t idx1 = ((qs_byte >> 2) & 0x3) | (((sgn_byte >> (shift_s+1)) & 0x1) << 2);
-                    const uint8_t idx2 = ((qs_byte >> 4) & 0x3) | (((sgn_byte >> (shift_s+2)) & 0x1) << 2);
-                    const uint8_t idx3 = ((qs_byte >> 6) & 0x3) | (((sgn_byte >> (shift_s+3)) & 0x1) << 2);
-
 #pragma unroll
                     for (int j = 0; j < ncols; ++j) {
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].x += sc[idx0]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].y += sc[idx1]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].x += sc[idx2]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].y += sc[idx3]*KQ_k[j];
-                    }
-                }
-            } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
-                const block_turbo2_0 * vb = (const block_turbo2_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[4];
-
-#pragma unroll
-                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
-                    const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO2;
-                    const int j0 = i0 % QK_TURBO2;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 4; ++c) { sc[c] = TURBO_CENTROIDS_2BIT[c] * norm; }
-                    }
-
-                    const uint8_t qs_byte = vb[ib].qs[j0 / 4];
-
-                    const uint8_t idx0 = (qs_byte >> 0) & 0x3;
-                    const uint8_t idx1 = (qs_byte >> 2) & 0x3;
-                    const uint8_t idx2 = (qs_byte >> 4) & 0x3;
-                    const uint8_t idx3 = (qs_byte >> 6) & 0x3;
-
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].x += sc[idx0]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].y += sc[idx1]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].x += sc[idx2]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].y += sc[idx3]*KQ_k[j];
-                    }
-                }
-            } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
-                const block_turbo4_0 * vb = (const block_turbo4_0 *)v_paged_ptr(V_paged_base, nb21, v_ptable, sequence, v_ptable_ne0, v_block_size, k_VKQ_0 + k, k_VKQ_max);
-                int prev_ib = -1;
-                float sc[16];
-
-#pragma unroll
-                for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
-                    const int i0 = 2*i_VKQ_0 + (threadIdx.x % nthreads_V)*V_rows_per_thread;
-                    const int ib = i0 / QK_TURBO4;
-                    const int j0 = i0 % QK_TURBO4;
-
-                    if (ib != prev_ib) {
-                        prev_ib = ib;
-                        const float norm = __half2float(vb[ib].norm);
-#pragma unroll
-                        for (int c = 0; c < 16; ++c) { sc[c] = TURBO_CENTROIDS_4BIT[c] * norm; }
-                    }
-
-                    const uint8_t qs_byte0 = vb[ib].qs[j0 / 2];
-                    const uint8_t qs_byte1 = vb[ib].qs[j0 / 2 + 1];
-
-                    const uint8_t idx0 = (qs_byte0 >> 0) & 0xF;
-                    const uint8_t idx1 = (qs_byte0 >> 4) & 0xF;
-                    const uint8_t idx2 = (qs_byte1 >> 0) & 0xF;
-                    const uint8_t idx3 = (qs_byte1 >> 4) & 0xF;
-
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].x += sc[idx0]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 0].y += sc[idx1]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].x += sc[idx2]*KQ_k[j];
-                        VKQ[j][i_VKQ_0/nthreads_V + 1].y += sc[idx3]*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 0].x += tmp[0].x*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 0].y += tmp[0].y*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 1].x += tmp[1].x*KQ_k[j];
+                        VKQ[j][i_VKQ_0/nthreads_V + 1].y += tmp[1].y*KQ_k[j];
                     }
                 }
             } else {
