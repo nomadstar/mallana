@@ -419,7 +419,12 @@ static __global__ void flash_attn_ext_vec(
 
             KQ_reg[j] = __expf(KQ_reg[j] - KQ_max[j]);
             KQ_sum[j] = KQ_sum[j]*KQ_max_scale + KQ_reg[j];
-            if constexpr (!V_is_turbo) { KQ[j*nthreads + tid] = KQ_reg[j]; }
+            // Turbo used to keep KQ in registers and broadcast it with __shfl_sync during V
+            // accumulation, but that shuffle path produced incoherent output on ROCm/gfx1100
+            // (turbo3 gibberish, turbo2 crash). The shared-memory path below is exactly
+            // equivalent (srcLane k0+off in warp threadIdx.y == KQ slot threadIdx.y*WARP_SIZE+k0+off)
+            // and is the one f16 already uses correctly on RDNA3, so turbo now shares it.
+            KQ[j*nthreads + tid] = KQ_reg[j];
 
 #if defined(TURBO_DIAG_KQ)
             if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0 && j == 0) {
@@ -446,9 +451,9 @@ static __global__ void flash_attn_ext_vec(
         // below (KQ[j*nthreads + k], i.e. another lane's slot). This barrier must run on HIP
         // too: on RDNA3 (wave32) the compiler/memory model does NOT guarantee the write is
         // visible without it, so skipping it corrupted attention weights and produced
-        // repetitive-gibberish generation on gfx1100. (The turbo path reads via __shfl_sync,
-        // not shared memory, so it does not need this — hence the !V_is_turbo guard.)
-        if constexpr (!V_is_turbo) { __syncwarp(); }
+        // repetitive-gibberish generation on gfx1100. Turbo now uses the same shared-memory
+        // path (see above), so it needs this barrier too.
+        __syncwarp();
 
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
@@ -458,12 +463,7 @@ static __global__ void flash_attn_ext_vec(
             half2 KQ_k[ncols];
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                if constexpr (V_is_turbo) {
-                    const float kq_val = __shfl_sync(0xFFFFFFFF, KQ_reg[j], k0 + (nthreads_V == WARP_SIZE ? 0 : threadIdx.x / nthreads_V), WARP_SIZE);
-                    KQ_k[j] = make_half2(__float2half(kq_val), __float2half(kq_val));
-                } else {
-                    KQ_k[j] = __half2half2(KQ[j*nthreads + k]);
-                }
+                KQ_k[j] = __half2half2(KQ[j*nthreads + k]);
             }
 
             // Sparse V: skip V dequant if all attention weights for this position are negligible.
@@ -508,11 +508,7 @@ static __global__ void flash_attn_ext_vec(
             float KQ_k[ncols];
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                if constexpr (V_is_turbo) {
-                    KQ_k[j] = __shfl_sync(0xFFFFFFFF, KQ_reg[j], k0 + (nthreads_V == WARP_SIZE ? 0 : threadIdx.x / nthreads_V), WARP_SIZE);
-                } else {
-                    KQ_k[j] = KQ[j*nthreads + k];
-                }
+                KQ_k[j] = KQ[j*nthreads + k];
             }
 
             // Sparse V: skip V dequant if all attention weights for this position are negligible.
