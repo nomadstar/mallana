@@ -20,31 +20,31 @@
 
 // ---- 2-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static __constant__ float TURBO_CENTROIDS_2BIT[4] = {
+static const __device__ float TURBO_CENTROIDS_2BIT[4] = {
     -0.133462f, -0.039994f, 0.039994f, 0.133462f
 };
 
-static __constant__ float TURBO_MID_2BIT[3] = {
+static const __device__ float TURBO_MID_2BIT[3] = {
     -0.086728f, 0.0f, 0.086728f
 };
 
 // ---- 3-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static __constant__ float TURBO_CENTROIDS_3BIT[8] = {
+static const __device__ float TURBO_CENTROIDS_3BIT[8] = {
     -0.190685f, -0.117832f, -0.065717f, -0.021460f,
      0.021460f,  0.065717f,  0.117832f,  0.190685f
 };
 
 // ---- Midpoints for nearest centroid lookup ----
 
-static __constant__ float TURBO_MID_3BIT[7] = {
+static const __device__ float TURBO_MID_3BIT[7] = {
     -0.154259f, -0.091775f, -0.043589f, 0.0f,
      0.043589f,  0.091775f,  0.154259f
 };
 
 // ---- WHT sign arrays (seed=42) ----
 
-static __constant__ float TURBO_WHT_SIGNS1[128] = {
+static const __device__ float TURBO_WHT_SIGNS1[128] = {
     -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
     1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
     -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,
@@ -55,7 +55,7 @@ static __constant__ float TURBO_WHT_SIGNS1[128] = {
     1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f
 };
 
-static __constant__ float TURBO_WHT_SIGNS2[128] = {
+static const __device__ float TURBO_WHT_SIGNS2[128] = {
     1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
     1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
     1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f,
@@ -68,14 +68,14 @@ static __constant__ float TURBO_WHT_SIGNS2[128] = {
 
 // ---- 64-element WHT sign arrays (first 64 of the 128-element arrays) ----
 
-static __constant__ float TURBO_WHT_SIGNS1_64[64] = {
+static const __device__ float TURBO_WHT_SIGNS1_64[64] = {
     -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
     1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
     -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,
     1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f
 };
 
-static __constant__ float TURBO_WHT_SIGNS2_64[64] = {
+static const __device__ float TURBO_WHT_SIGNS2_64[64] = {
     1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
     1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
     1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f,
@@ -294,7 +294,7 @@ static bool turbo_innerq_is_active(void) {
 
 // ---- 4-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static __constant__ float TURBO_CENTROIDS_4BIT[16] = {
+static const __device__ float TURBO_CENTROIDS_4BIT[16] = {
     -0.173926f, -0.117195f, -0.089527f, -0.068756f,
     -0.051262f, -0.035597f, -0.020989f, -0.006938f,
      0.006938f,  0.020989f,  0.035597f,  0.051262f,
@@ -303,7 +303,7 @@ static __constant__ float TURBO_CENTROIDS_4BIT[16] = {
 
 // ---- Midpoints for nearest 4-bit centroid lookup ----
 
-static __constant__ float TURBO_MID_4BIT[15] = {
+static const __device__ float TURBO_MID_4BIT[15] = {
     -0.145561f, -0.103361f, -0.079142f, -0.060009f,
     -0.043430f, -0.028293f, -0.013964f,  0.000000f,
      0.013964f,  0.028293f,  0.043430f,  0.060009f,

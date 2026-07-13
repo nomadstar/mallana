@@ -170,4 +170,9 @@ a.out.*
 .multiswarm_*
 multiswarm_*
 
+# Temporary clones for observation
+/temp_jagsan/
+/temp_turboquant_hip/
+
+
 
