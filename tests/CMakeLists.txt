@@ -256,13 +256,18 @@ set_tests_properties(test-recurrent-state-rollback PROPERTIES FIXTURES_REQUIRED 
 llama_build_and_test(test-save-load-state.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
 set_tests_properties(test-save-load-state PROPERTIES FIXTURES_REQUIRED test-download-model)
 
+# The TurboQuant codec (quantize/dequantize_row_turbo*) lives in ggml-base, which is
+# linked regardless of dynamic backend loading, so this test builds fine with GGML_BACKEND_DL
+# (unlike the direct-backend tests below). Keep it out of the NOT-BACKEND_DL block so the
+# fork's core round-trip test still runs in the runtime-CPU-dispatch CI build.
+llama_build_and_test(test-turbo-quant.c)
+
 if (NOT GGML_BACKEND_DL)
     # these tests use the backends directly and cannot be built with dynamic loading
     llama_build_and_test(test-barrier.cpp)
     llama_build_and_test(test-quantize-fns.cpp)
     llama_build_and_test(test-quantize-perf.cpp)
     llama_build_and_test(test-rope.cpp)
-    llama_build_and_test(test-turbo-quant.c)
     llama_build_and_test(test-col2im-1d.cpp)
 endif()
 
