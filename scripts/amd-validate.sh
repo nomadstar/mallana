@@ -193,13 +193,18 @@ run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa
     -d '{"messages":[{"role":"user","content":"Hi"}],"max_tokens":8}' >/dev/null 2>&1
   local t0 nsec
   t0=$(date +%s.%N)
-  python3 - "$PORT" "$PROMPTS_JSON" "$OUT" <<'PY'
+  python3 - "$PORT" "$PROMPTS_JSON" "$OUT" "${MAXTOK:-256}" <<'PY'
 import sys,json,time,urllib.request
 port,inp,out=sys.argv[1],sys.argv[2],sys.argv[3]
+maxtok=int(sys.argv[4]) if len(sys.argv)>4 else 256
+def looks_garbage(s):
+    if not s: return False
+    letters=sum(c.isalpha() or c.isspace() for c in s)
+    return len(s)>=20 and letters/len(s) < 0.60   # mucha basura no-alfabética
 tasks=json.load(open(inp)); res=[]
 for t in tasks:
     body=json.dumps({"messages":[{"role":"user","content":t["prompt"]}],
-        "max_tokens":768,"temperature":0.3,"top_p":0.9,"stream":False}).encode()
+        "max_tokens":maxtok,"temperature":0.3,"top_p":0.9,"stream":False}).encode()
     r=urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
         data=body,headers={"Content-Type":"application/json"},method="POST")
     s=time.time()
@@ -208,7 +213,8 @@ for t in tasks:
             a=json.loads(resp.read())["choices"][0]["message"]["content"].strip()
     except Exception as e: a=f"[ERR {e}]"
     dt=time.time()-s
-    print(f"  {t['task_id']:5s} {dt:5.1f}s  {a[:90]!r}")
+    flag=" <<< GARBAGE?" if looks_garbage(a) else ""
+    print(f"  {t['task_id']:5s} {dt:5.1f}s  {a[:80]!r}{flag}")
     res.append({"task_id":t["task_id"],"answer":a})
 json.dump(res,open(out,"w"),indent=2)
 PY
@@ -218,8 +224,21 @@ PY
   echo
 }
 
-run_sweep "A f16 baseline"  f16  f16    on
-run_sweep "B TurboQuant"    q8_0 turbo3 on
+# --- Diagnóstico de TurboQuant en ROCm ---------------------------------------
+# turbo3 salió BASURA en gfx1100 (RDNA3). Estas configs aíslan la causa:
+#   A f16/f16      = línea base coherente (control)
+#   B q8_0/turbo3  = combo del README (observado: basura)
+#   C f16/turbo3   = ¿es la V=turbo3 sola? (K=f16 descarta la K)
+#   D q8_0/q8_0    = ¿es la K=q8_0 en FA? (V sin turbo)
+#   E q8_0/turbo2  = ¿turbo2 sí y turbo3 no? (aísla la variante)
+#   F f16/f16 fa=off = control sin Flash Attention
+# Lee la columna: "<<< GARBAGE?" marca output incoherente automáticamente.
+run_sweep "A f16/f16       fa=on"  f16  f16    on
+run_sweep "B q8_0/turbo3   fa=on"  q8_0 turbo3 on
+run_sweep "C f16/turbo3    fa=on"  f16  turbo3 on
+run_sweep "D q8_0/q8_0     fa=on"  q8_0 q8_0   on
+run_sweep "E q8_0/turbo2   fa=on"  q8_0 turbo2 on
+run_sweep "F f16/f16       fa=off" f16  f16    off
 
 echo "############ RESUMEN — pégame esto ############"
 echo "GPU     : $(rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{f=1} f&&/Marketing Name/{sub(/^ *Marketing Name: */,"");print;exit}' || echo '?')"

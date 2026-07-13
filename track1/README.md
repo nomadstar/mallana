@@ -26,8 +26,11 @@ larger, more accurate model — and a longer context — fits in the same RAM/VR
 per byte means more questions answered *well*, locally, at 0 tokens. On an accuracy-gated,
 token-minimizing leaderboard, running a stronger local model is exactly what breaks the tie.
 
-Validated on real AMD hardware (Radeon gfx1100 / RDNA3): TurboQuant costs ~0.5% prompt and ~6%
-generation throughput while shrinking the V-cache up to 6.4× (see [../docs/benchmarks.md](../docs/benchmarks.md)).
+Status on AMD (Radeon gfx1100 / RDNA3, ROCm): full GPU offload of the model is validated and fast —
+the 3B runs all sample tasks coherently with `-ngl 99` at ~2 s/task. The compressed-V-cache path
+(`turbo3` under Flash Attention) currently produces incoherent output on this ROCm build and is
+under active debugging (`scripts/amd-validate.sh` ships the isolation sweep); the CUDA path is the
+validated one. **The Track 1 submission does not depend on this** — it runs f16 on CPU.
 
 ## Submission contract
 
