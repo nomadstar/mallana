@@ -41,10 +41,20 @@ jobs:
 
       - name: Build
         run: |
+          # Build with GGML's runtime CPU dispatch instead of -march=native.
+          # GGML_CPU_ALL_VARIANTS compiles every x86 ISA variant (sse42 … icelake
+          # … sapphirerapids) and GGML_BACKEND_DL loads the best one the *current*
+          # CPU supports at runtime. This avoids SIGILL ("Illegal instruction") on
+          # GitHub's heterogeneous runner pool, where -march=native objects (AVX512/
+          # AMX) compiled on one runner — or restored from ccache — get executed on
+          # another that lacks them. AMX stays gated by arch_prctl at runtime.
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLAMA_BUILD_TESTS=ON \
-            -DGGML_RPC=ON
+            -DGGML_RPC=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON
           time cmake --build build --config Release -j $(nproc)
 
       - name: Test (ctest -L main)
