@@ -163,10 +163,13 @@ cat > "$PROMPTS_JSON" <<'JSON'
 ]
 JSON
 
-run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa
-  local label="$1" ctk="$2" ctv="$3" fa="$4"
-  echo "############ CONFIG: $label  (fa=$fa K=$ctk V=$ctv, -ngl 99 GPU) ############"
-  "$BIN" -m "$MODEL" --port $PORT --host 127.0.0.1 -c 2048 -ngl 99 \
+VERDICTS="$HOME/mallana_verdicts.txt"
+: > "$VERDICTS"   # reset the machine-readable verdict log for this run
+
+run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa   (uses globals: SWEEP_BIN, SWEEP_NGL, BACKEND)
+  local label="$BACKEND $1" ctk="$2" ctv="$3" fa="$4"
+  echo "############ CONFIG: $label  (fa=$fa K=$ctk V=$ctv, -ngl $SWEEP_NGL) ############"
+  "$SWEEP_BIN" -m "$MODEL" --port $PORT --host 127.0.0.1 -c 2048 -ngl "$SWEEP_NGL" \
       -fa "$fa" --cache-type-k "$ctk" --cache-type-v "$ctv" >/tmp/srv_$PORT.log 2>&1 &
   local pid=$!
   local up=0
@@ -177,11 +180,14 @@ run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa
   done
   [ "$up" = 1 ] || { echo "!! el server no quedó healthy en 180s:"; tail -20 /tmp/srv_$PORT.log; kill $pid 2>/dev/null; return; }
 
-  # Confirmar que las capas REALMENTE se descargaron a GPU (no CPU fallback silencioso)
-  if grep -qiE 'offloaded .*layers to GPU|ROCm[0-9]|using ROCm' /tmp/srv_$PORT.log; then
-    grep -iE 'offloaded .*layers to GPU|ROCm[0-9].*:' /tmp/srv_$PORT.log | head -3 | sed 's/^/   [GPU] /'
-  else
-    echo "   (aviso: no vi confirmación de offload a GPU en el log — revisa /tmp/srv_$PORT.log)"
+  # Confirmar que las capas REALMENTE se descargaron a GPU (no CPU fallback silencioso).
+  # Sólo aplica al backend GPU; en CPU el offload=0 es lo esperado.
+  if [ "$BACKEND" = GPU ]; then
+    if grep -qiE 'offloaded .*layers to GPU|ROCm[0-9]|using ROCm' /tmp/srv_$PORT.log; then
+      grep -iE 'offloaded .*layers to GPU|ROCm[0-9].*:' /tmp/srv_$PORT.log | head -3 | sed 's/^/   [GPU] /'
+    else
+      echo "   (aviso: no vi confirmación de offload a GPU en el log — revisa /tmp/srv_$PORT.log)"
+    fi
   fi
 
   # warmup (absorbe la primera request)
@@ -189,18 +195,16 @@ run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa
     -d '{"messages":[{"role":"user","content":"Hi"}],"max_tokens":8}' >/dev/null 2>&1
   local t0 nsec
   t0=$(date +%s.%N)
-  python3 - "$PORT" "$PROMPTS_JSON" "$OUT" "${MAXTOK:-256}" <<'PY'
-import sys,json,time,urllib.request
+  python3 - "$PORT" "$PROMPTS_JSON" "$OUT" "${MAXTOK:-256}" "$label" "$VERDICTS" <<'PY'
+import sys,json,time,urllib.request,re
 port,inp,out=sys.argv[1],sys.argv[2],sys.argv[3]
 maxtok=int(sys.argv[4]) if len(sys.argv)>4 else 256
-def looks_garbage(s):
-    if not s: return False
-    letters=sum(c.isalpha() or c.isspace() for c in s)
-    return len(s)>=20 and letters/len(s) < 0.60   # mucha basura no-alfabética
-tasks=json.load(open(inp)); res=[]
-for t in tasks:
-    body=json.dumps({"messages":[{"role":"user","content":t["prompt"]}],
-        "max_tokens":maxtok,"temperature":0.3,"top_p":0.9,"stream":False}).encode()
+label=sys.argv[5] if len(sys.argv)>5 else "?"
+verdicts=sys.argv[6] if len(sys.argv)>6 else None
+
+def ask(prompt, mt, temp):
+    body=json.dumps({"messages":[{"role":"user","content":prompt}],
+        "max_tokens":mt,"temperature":temp,"top_p":0.9,"stream":False}).encode()
     r=urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
         data=body,headers={"Content-Type":"application/json"},method="POST")
     s=time.time()
@@ -208,38 +212,146 @@ for t in tasks:
         with urllib.request.urlopen(r,timeout=120) as resp:
             a=json.loads(resp.read())["choices"][0]["message"]["content"].strip()
     except Exception as e: a=f"[ERR {e}]"
-    dt=time.time()-s
-    flag=" <<< GARBAGE?" if looks_garbage(a) else ""
-    print(f"  {t['task_id']:5s} {dt:5.1f}s  {a[:80]!r}{flag}")
+    return a, time.time()-s
+
+from collections import Counter
+def looks_garbage(s):
+    # Catches BOTH non-text noise AND repetition-loop collapse (e.g. 'ót\nót\nót…' or
+    # 'CAT ophobic ophobic ophobic'), which a pure alphabetic-ratio check misses because
+    # the loop is 'letters'. Tuned to fire on SHORT probe answers too, not just long prose.
+    if not s: return False
+    if len(s)>=20:
+        letters=sum(c.isalpha() or c.isspace() for c in s)
+        if letters/len(s) < 0.60: return True                   # non-text junk
+    toks=re.findall(r"\w+", s.lower())
+    # 3+ identical tokens IN A ROW = loop (works even on short answers)
+    run=1
+    for i in range(1,len(toks)):
+        run = run+1 if toks[i]==toks[i-1] else 1
+        if run>=3: return True
+    if len(toks)>=4:
+        top,n=Counter(toks).most_common(1)[0]
+        if n>=4 and n>0.35*len(toks): return True               # one token dominates
+        if len(toks)>=8 and len(set(toks))/len(toks) < 0.25: return True
+    return False
+
+# ---- Objective known-answer probes: deterministic (temp 0), unambiguous. ----
+# A config that can't answer these is producing garbage/degraded output, no eyeballing.
+PROBES=[
+ ("What is the capital of Australia? Reply with only the city name.", ["canberra"]),
+ ("Compute 15 + 27. Reply with only the number.", ["42"]),
+ ("What is the opposite of 'hot'? Reply with one word.", ["cold"]),
+ ("Mixing blue and yellow paint gives which color? Reply with one word.", ["green"]),
+ ("Spell the word 'cat' in uppercase. Reply with only that.", ["CAT"]),
+]
+
+tasks=json.load(open(inp)); res=[]; garbage=0
+for t in tasks:
+    a,dt=ask(t["prompt"], maxtok, 0.3)
+    g=looks_garbage(a); garbage+=g
+    print(f"  {t['task_id']:5s} {dt:5.1f}s  {a[:80]!r}{' <<< GARBAGE?' if g else ''}")
     res.append({"task_id":t["task_id"],"answer":a})
 json.dump(res,open(out,"w"),indent=2)
+
+# probe phase
+correct=0
+print("  -- known-answer probes (temp 0) --")
+for q,exps in PROBES:
+    a,_=ask(q, 24, 0.0)
+    al=a.lower()
+    # A probe is correct ONLY if the expected answer is present AND the output is not a
+    # loop/garbage — otherwise a model that emits the answer then collapses (e.g.
+    # 'CAT ophobic ophobic…') would falsely pass. This is what catches a degraded config.
+    g=looks_garbage(a)
+    ok=any(e.lower() in al for e in exps) and not g
+    correct+=ok
+    print(f"     [{'OK ' if ok else 'XX '}] want={exps[0]!r:12s} got={a[:40]!r}{' <loop>' if g else ''}")
+
+# Strict: these probes are trivial + deterministic, so a coherent config aces ALL of them.
+# Even one loop/miss means the KV config degraded the model — that's the signal we want.
+verdict = "PASS" if (correct==len(PROBES) and garbage==0) else "FAIL"
+print(f"  >> VERDICT: {verdict}  (probes {correct}/{len(PROBES)} correct, garbage {garbage}/{len(tasks)})")
+if verdicts:
+    open(verdicts,"a").write(f"{verdict}\t{label}\tprobes={correct}/{len(PROBES)}\tgarbage={garbage}/{len(tasks)}\n")
 PY
   nsec=$(python3 -c "print(f'{ $(date +%s.%N) - $t0 :.1f}')")
-  echo "  >> tiempo total 10 tasks: ${nsec}s   (resultados: $OUT)"
+  echo "  >> tiempo total: ${nsec}s   (resultados: $OUT)"
   kill $pid 2>/dev/null; wait $pid 2>/dev/null
   echo
 }
 
-# --- Diagnóstico de TurboQuant en ROCm ---------------------------------------
-# turbo3 salió BASURA en gfx1100 (RDNA3). Estas configs aíslan la causa:
+# --- Sweep de configs (aísla K vs V vs fa) -----------------------------------
 #   A f16/f16      = línea base coherente (control)
-#   B q8_0/turbo3  = combo del README (observado: basura)
-#   C f16/turbo3   = ¿es la V=turbo3 sola? (K=f16 descarta la K)
-#   D q8_0/q8_0    = ¿es la K=q8_0 en FA? (V sin turbo)
-#   E q8_0/turbo2  = ¿turbo2 sí y turbo3 no? (aísla la variante)
+#   B q8_0/turbo3  = combo TurboQuant (K comprimida + V 3-bit)
+#   C f16/turbo3   = V=turbo3 sola (K=f16 descarta la K)
+#   D q8_0/q8_0    = K=q8_0 sin turbo (control de la K)
+#   E q8_0/turbo2  = variante turbo2
 #   F f16/f16 fa=off = control sin Flash Attention
-# Lee la columna: "<<< GARBAGE?" marca output incoherente automáticamente.
-run_sweep "A f16/f16       fa=on"  f16  f16    on
-run_sweep "B q8_0/turbo3   fa=on"  q8_0 turbo3 on
-run_sweep "C f16/turbo3    fa=on"  f16  turbo3 on
-run_sweep "D q8_0/q8_0     fa=on"  q8_0 q8_0   on
-run_sweep "E q8_0/turbo2   fa=on"  q8_0 turbo2 on
-run_sweep "F f16/f16       fa=off" f16  f16    off
+# Cada config imprime "<<< GARBAGE?" (incoherencia/loop) y un VERDICT PASS/FAIL
+# objetivo basado en preguntas de respuesta conocida (temp 0) — sin necesidad de
+# leer los previews a ojo. IMPORTANTE: usa SIEMPRE el modelo instruct real
+# (Qwen2.5-3B); un modelo débil (p.ej. coder-1.5b-bf16) colapsa en loops con
+# cualquier KV con pérdida y FINGE un bug de turbo — no es turbo, es el modelo.
+do_sweeps() {
+  run_sweep "A f16/f16       fa=on"  f16  f16    on
+  run_sweep "B q8_0/turbo3   fa=on"  q8_0 turbo3 on
+  run_sweep "C f16/turbo3    fa=on"  f16  turbo3 on
+  run_sweep "D q8_0/q8_0     fa=on"  q8_0 q8_0   on
+  run_sweep "E q8_0/turbo2   fa=on"  q8_0 turbo2 on
+  run_sweep "F f16/f16       fa=off" f16  f16    off
+}
+
+# ===== Backend GPU (HIP/ROCm, -ngl 99) =====
+if [ "${RUN_GPU:-1}" = 1 ]; then
+  echo "############ SWEEP GPU (HIP/ROCm, -ngl 99) ############"
+  BACKEND=GPU SWEEP_BIN="$BIN" SWEEP_NGL=99
+  export BACKEND SWEEP_BIN SWEEP_NGL
+  do_sweeps
+fi
+
+# ===== Backend CPU (-ngl 0) =====
+# Valida turbo en CPU — el mismo path que usa el grader de Track 1 (sin GPU) y donde
+# el confundido "bug de turbo" resultó ser el modelo. Compila un binario CPU aparte
+# en build-cpu/ (NO reusa build-hip/ para no correr en GPU por error).
+if [ "${RUN_CPU:-1}" = 1 ]; then
+  echo "############ Binario llama-server (CPU) ############"
+  CPU_BIN="$PWD/build-cpu/bin/llama-server"
+  if [ ! -f build-cpu/CMakeCache.txt ]; then
+    echo ">> Configurando build CPU (sin HIP)..."
+    cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=OFF -DGGML_NATIVE=ON \
+      || die "cmake (config CPU) falló."
+  fi
+  echo ">> Compilando (incremental) llama-server CPU..."
+  cmake --build build-cpu --target llama-server -j"$(nproc)" || die "build CPU falló."
+  [ -x "$CPU_BIN" ] || die "No se generó $CPU_BIN"
+  # Sanity: el binario CPU NO debe estar enlazado a ROCm (si lo está, correría en GPU).
+  if ldd "$CPU_BIN" 2>/dev/null | grep -qiE 'amdhip|hsa-runtime'; then
+    echo "   (aviso: el binario 'CPU' está enlazado a ROCm; -ngl 0 igual fuerza CPU)"
+  fi
+  echo "############ SWEEP CPU (-ngl 0) ############"
+  BACKEND=CPU SWEEP_BIN="$CPU_BIN" SWEEP_NGL=0
+  export BACKEND SWEEP_BIN SWEEP_NGL
+  do_sweeps
+fi
 
 echo "############ RESUMEN — pégame esto ############"
 echo "GPU     : $(rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{f=1} f&&/Marketing Name/{sub(/^ *Marketing Name: */,"");print;exit}' || echo '?')"
 echo "GFX     : $GFX"
 echo "Binario : $BIN  ($(ldd "$BIN" 2>/dev/null | grep -oiE 'libamdhip[^ ]*' | head -1))"
 echo "Modelo  : $(basename "$MODEL")"
-echo "Salida  : $OUT (última config = turbo3)"
-echo "(arriba: por-tarea con segundos y preview; y el tiempo total de cada config)"
+echo
+echo "  VEREDICTOS (objetivo, PASS = 5/5 respuestas conocidas correctas y 0 basura/loops):"
+if [ -s "$VERDICTS" ]; then
+  column -t -s $'\t' "$VERDICTS" | sed 's/^/    /'
+  fails=$(grep -c '^FAIL' "$VERDICTS" || true)
+  total=$(wc -l < "$VERDICTS")
+  echo
+  if [ "${fails:-0}" -eq 0 ]; then
+    echo "  ==> TODO PASS ($total configs GPU+CPU). TurboQuant coherente en ambos backends."
+  else
+    echo "  ==> $fails/$total configs FAIL — revisa cuáles arriba (backend + K/V)."
+  fi
+else
+  echo "    (sin veredictos — ningún sweep corrió)"
+fi
+echo "(arriba: por-tarea con preview + probes; VERDICT PASS/FAIL por config)"
