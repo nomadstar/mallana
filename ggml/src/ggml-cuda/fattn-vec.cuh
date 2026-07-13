@@ -774,40 +774,44 @@ static __global__ void flash_attn_ext_vec(
                 // stride=2: local butterfly within 4-element chunk
                 { float t0 = val[0], t1 = val[2]; val[0] = t0 + t1; val[2] = t0 - t1; }
                 { float t0 = val[1], t1 = val[3]; val[1] = t0 + t1; val[3] = t0 - t1; }
-                // stride=4,8,16,32,64: cross-thread butterfly via __shfl_xor_sync
+                // Before starting cross-thread butterfly, write val to shared memory
+                for (int off = 0; off < 4; ++off) {
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                    section_h[base + off] = __float2half(val[off]);
+#else
+                    section_f[base + off] = val[off];
+#endif
+                }
+                __syncthreads();
+
+                // stride=4,8,16,32,64: cross-thread butterfly via shared memory
                 for (int s = 4; s <= 64; s <<= 1) {
-                    int xor_lane = s / 4;
                     float other[4];
                     for (int off = 0; off < 4; ++off) {
-                        other[off] = __shfl_xor_sync(0xFFFFFFFF, val[off], xor_lane, WARP_SIZE);
-                    }
+                        int partner_idx = (base + off) ^ s;
 #ifdef V_DOT2_F32_F16_AVAILABLE
-                    half * sh = section_h;
-                    for (int off = 0; off < 4; ++off) {
-                        int idx = base + off;
-                        if ((idx & s) == 0) {
-                            sh[idx]     = __float2half(val[off] + other[off]);
-                            sh[idx ^ s] = __float2half(val[off] - other[off]);
-                        }
-                    }
-                    __syncthreads();
-                    for (int off = 0; off < 4; ++off) {
-                        val[off] = __half2float(sh[base + off]);
-                    }
+                        other[off] = __half2float(section_h[partner_idx]);
 #else
-                    float * sf = section_f;
+                        other[off] = section_f[partner_idx];
+#endif
+                    }
                     for (int off = 0; off < 4; ++off) {
                         int idx = base + off;
                         if ((idx & s) == 0) {
-                            sf[idx]     = val[off] + other[off];
-                            sf[idx ^ s] = val[off] - other[off];
+                            val[off] = val[off] + other[off];
+                        } else {
+                            val[off] = other[off] - val[off];
                         }
                     }
-                    __syncthreads();
+                    // Write back to shared memory for the next stage
                     for (int off = 0; off < 4; ++off) {
-                        val[off] = sf[base + off];
-                    }
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                        section_h[base + off] = __float2half(val[off]);
+#else
+                        section_f[base + off] = val[off];
 #endif
+                    }
+                    __syncthreads();
                 }
                 // S1 signs and scale by 1/sqrt(128)
                 constexpr float inv_sqrt_128 = 0.08838834764831845f;
