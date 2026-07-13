@@ -848,6 +848,8 @@ static __global__ void flash_attn_ext_vec(
         }
 #endif // V_DOT2_F32_F16_AVAILABLE
 
+        __syncthreads();
+
         // Cooperative inverse WHT rotation for turbo V types:
         // VKQ accumulated in WHT domain (R·v), transform back to original domain (v)
         // R^{-1}(x) = S1 · FWHT(S2 · x) / sqrt(128)
