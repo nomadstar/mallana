@@ -49,15 +49,24 @@ NGL = os.environ.get("LLAMA_NGL", "99")
 # 768-token essay costs ~60s/task and blows the wall-clock budget (→ SIGKILL → runtime error).
 # A concise answer within a small cap finishes in seconds. SYSTEM_PROMPT stops the model from
 # padding short-answer tasks into essays (a huge latency + token saving).
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "256"))
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "448"))
+# Low temperature: the graded tasks are deterministic (math, extraction, classification), where
+# sampling noise only flips borderline arithmetic (measured 0.3 → unstable 924/1.875/5-cup answers;
+# 0.1 → stable, correct). Not zero, to avoid the small-model greedy repetition collapse.
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.1"))
 FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0.0"))
 PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0.0"))
+# Reasoning-aware, not terse: a small model gets multi-step math/logic WRONG when told to emit
+# only a final value (measured — "2400*37%" collapsed to a wrong number). Letting it show brief
+# steps first, then a stated final answer, materially raises correctness on the arithmetic and
+# exact-format tasks in this set, while still keeping outputs focused.
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
-    "You are a precise assistant. Answer the task directly and concisely. Give only what is "
-    "asked — no preamble, no restating the question, no repetition. If the task asks for a "
-    "specific value or format, output exactly that and nothing else.")
+    "You are a careful, accurate assistant. Answer directly and concisely. For arithmetic, "
+    "counting, dates, or multi-step logic, briefly compute the actual intermediate values step "
+    "by step (do not just write a formula), then state the final answer. Obey exact output-format "
+    "constraints precisely (for example, exactly two sentences or exactly three bullet points). "
+    "Do not restate the question or add filler.")
 
 # --- Timeout safety ---
 # On ~2 vCPU each task must stay well under the grader's hard limit. Streaming lets a timed-out

@@ -64,10 +64,11 @@ COPY --from=builder /app/build/bin/llama-server /app/llama-server
 
 # Bake a general-purpose instruct model into the image — the scorer does NOT mount a model, so the
 # submission MUST be self-contained (a model-less image produces empty answers → 0% accuracy gate).
-# Qwen2.5-1.5B-Instruct (Apache-2.0): capable on general tasks yet small/fast enough to stay well
-# within the CPU per-task time budget (a 3B times out on CPU). If the scorer DOES mount /models, that
-# takes precedence (agent.py resolves /models first, then this baked /app/model.gguf as the fallback).
-ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+# Qwen2.5-3B-Instruct (Apache-2.0): materially more accurate than the 1.5B on the graded task mix
+# (multi-step math, exact-format summaries, sentiment nuance) while still finishing the sample set
+# within budget on 2 vCPU (~16s/task) with the concise/reason-only-for-math prompt + streaming.
+# If the scorer DOES mount /models, that wins (agent.py resolves /models first, then /app/model.gguf).
+ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 RUN echo "Baking model from $MODEL_URL" && curl -L --fail -o /app/model.gguf "$MODEL_URL"
 
 # Batch agent (the Track 1 contract entrypoint) + optional live-server alternative.
@@ -88,18 +89,19 @@ ENV FLASH_ATTN=off
 ENV CACHE_TYPE_K=f16
 ENV CACHE_TYPE_V=f16
 ENV CTX_SIZE=2048
-# Sized for the ~2 vCPU grader (~10-15 tok/s): a big cap makes the model write 60s+ essays that
-# blow the wall-clock budget → SIGKILL → RUNTIME_ERROR. 256 + a concise system prompt keeps every
-# task to a few seconds. Streaming keeps a partial answer if a task still hits its timeout.
-ENV MAX_TOKENS=256
-# Low-but-nonzero temp for deterministic-ish tasks; penalties off (they distort exact-format asks).
-ENV TEMPERATURE=0.3
+# Room for brief step-by-step reasoning (needed to get multi-step math right) but bounded so the
+# ~2 vCPU grader stays within budget. Streaming keeps a partial answer if a task hits its timeout.
+ENV MAX_TOKENS=448
+# Low temp: the graded tasks are deterministic; 0.3 flipped borderline math run-to-run, 0.1 is
+# stable and correct (not 0, to avoid the small-model greedy repetition collapse). Penalties off.
+ENV TEMPERATURE=0.1
 ENV FREQUENCY_PENALTY=0.0
 ENV PRESENCE_PENALTY=0.0
-# Per-task budget well under any plausible grader limit; global deadline self-terminates the run
-# gracefully (writing a complete results.json) BEFORE the grader can SIGKILL an over-budget run.
-ENV PER_TASK_TIMEOUT=25
-ENV GLOBAL_DEADLINE=240
+# Per-task budget bounds the slowest task; global deadline self-terminates the run gracefully
+# (writing a complete results.json) BEFORE the grader can SIGKILL an over-budget run. Sized for the
+# 3B on 2 vCPU (~16s/task): 280s comfortably covers a sample-scale set and stubs the tail if larger.
+ENV PER_TASK_TIMEOUT=45
+ENV GLOBAL_DEADLINE=280
 ENV TASK_INPUT_PATH=/input/tasks.json
 ENV TASK_OUTPUT_PATH=/output/results.json
 

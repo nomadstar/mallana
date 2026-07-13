@@ -56,8 +56,11 @@ accuracy gate.
 
 The published image is **precompiled and self-contained**: the `llama.cpp` build happens once at
 push time (never during evaluation) and a general-purpose instruct model
-([Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF)) is **baked in**,
-so the scorer can just pull and run — no model to provide, no runtime download:
+([Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF)) is **baked in**,
+so the scorer can just pull and run — no model to provide, no runtime download. The 3B is
+materially more accurate than the 1.5B on the graded task mix (multi-step math, exact-format
+summaries, sentiment nuance) yet still finishes the sample set within budget on 2 vCPU
+(~14 s/task) thanks to the concise/reason-only-for-math prompt, low temperature, and streaming:
 
 ```bash
 docker pull ghcr.io/nomadstar/mallana:track1-latest
@@ -93,11 +96,11 @@ For interactive use, `router.py` exposes the same local model over an OpenAI-com
 | `CACHE_TYPE_K` | `f16` | K cache type (`q8_0` to compress) |
 | `CACHE_TYPE_V` | `f16` | V cache type (`turbo3` for TurboQuant 6.4× compression, needs `-fa on`) |
 | `FLASH_ATTN` | `off` | Flash Attention (`on` to enable TurboQuant's compressed V-cache) |
-| `MAX_TOKENS` | `256` | Max generated tokens per task (sized for the ~2 vCPU grader) |
-| `SYSTEM_PROMPT` | *(concise default)* | Instructs the model to answer directly — no essays |
-| `PER_TASK_TIMEOUT` | `25` | Per-task wall-clock budget; a timeout keeps the streamed partial answer |
-| `GLOBAL_DEADLINE` | `240` | Whole-run budget; self-terminates cleanly before the grader can SIGKILL |
-| `TEMPERATURE` | `0.3` | Sampling temperature |
+| `MAX_TOKENS` | `448` | Max generated tokens per task (room for brief step-by-step math) |
+| `SYSTEM_PROMPT` | *(reason-only-for-math default)* | Concise answers; shows steps only for arithmetic/logic; obeys exact formats |
+| `PER_TASK_TIMEOUT` | `45` | Per-task wall-clock budget; a timeout keeps the streamed partial answer |
+| `GLOBAL_DEADLINE` | `280` | Whole-run budget; self-terminates cleanly before the grader can SIGKILL |
+| `TEMPERATURE` | `0.1` | Low: graded tasks are deterministic (higher temp flips borderline math) |
 | `CTX_SIZE` | `2048` | Context window |
 | `LLAMA_NGL` | `99` | GPU layers to offload (ignored on CPU-only builds) |
 | `PORT` | `8080` | Router listen port |

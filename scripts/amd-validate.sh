@@ -1,45 +1,121 @@
 #!/usr/bin/env bash
 # ============================================================================
 # mallana — validación AMD/ROCm (Track 1 sample tasks) con TurboQuant en GPU
-# Pega esto en una terminal de la instancia Radeon (JupyterLab).
-# Ajusta REPO y GFX si hace falta. Corre y pégame el bloque "RESUMEN" del final.
+#
+# Pégalo en una terminal de la instancia Radeon (JupyterLab) y córrelo:
+#     REPO=~/mallana bash scripts/amd-validate.sh
+#
+# Auto-detecta la arquitectura GPU, compila llama-server con HIP en un dir
+# dedicado (build-hip/), VERIFICA que el binario está enlazado a ROCm y que
+# las capas se descargan a GPU, y corre dos configs (f16 baseline y TurboQuant
+# turbo3). Al final pega el bloque "RESUMEN".
+#
+# Variables (todas opcionales):
+#   REPO   ruta del repo mallana         (default: intenta ~/mallana, ~/llama.cpp, y el cwd)
+#   GFX    arquitectura GPU, p.ej gfx1100 (default: auto-detecta)
+#   ROCWMMA=1  activa rocWMMA FATTN (mejor FA en RDNA3+, requiere rocwmma-dev)
+#   HSA_OVERRIDE_GFX_VERSION=11.0.0  si tu GPU no está soportada oficialmente
 # ============================================================================
 set -uo pipefail
 
-REPO="${REPO:-$HOME/llama.cpp}"          # ruta del repo mallana en la máquina AMD
-GFX="${GFX:-gfx1100}"                     # arquitectura RDNA3 de tu Radeon
+export PATH="/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH"
+GFX_OVERRIDE="${GFX:-}"
 MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 MODEL="$MODEL_DIR/qwen2.5-3b-instruct-q4_k_m.gguf"
 PORT=8244
 PROMPTS_JSON="$HOME/mallana_tasks.json"
 OUT="$HOME/mallana_results.json"
+ROCWMMA="${ROCWMMA:-0}"          # 0 = baseline robusto; 1 = FA acelerado (RDNA3+, necesita headers)
 
+die() { echo "!! $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
 echo "############ 0. Entorno ROCm ############"
-command -v rocminfo >/dev/null && rocminfo 2>/dev/null | grep -m1 'Name:.*gfx' || echo "(rocminfo no encontrado)"
-echo "REPO=$REPO  GFX=$GFX"
-cd "$REPO" || { echo "!! No existe $REPO — ajusta REPO="; exit 1; }
+command -v hipconfig >/dev/null 2>&1 || die "No encuentro hipconfig — ¿está ROCm instalado y en PATH? \
+Instala ROCm: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/quick-start.html"
+echo "ROCm path : $(hipconfig -R 2>/dev/null)"
+echo "hip clang : $(hipconfig -l 2>/dev/null)/clang"
+if command -v rocminfo >/dev/null 2>&1; then
+  rocminfo 2>/dev/null | grep -m1 'Marketing Name' | sed 's/^ *//' || true
+fi
+[ -e /dev/kfd ] || echo "(aviso: /dev/kfd no existe — el contenedor/host quizá no expone la GPU)"
 
+# --- localizar el repo mallana ---
+if [ -n "${REPO:-}" ]; then :; else
+  for cand in "$HOME/mallana" "$HOME/llama.cpp" "$PWD"; do
+    [ -f "$cand/CMakeLists.txt" ] && REPO="$cand" && break
+  done
+fi
+[ -n "${REPO:-}" ] && [ -f "$REPO/CMakeLists.txt" ] || die "No encuentro el repo mallana. Pásalo con REPO=/ruta/al/repo"
+cd "$REPO" || die "No puedo entrar a $REPO"
+echo "REPO=$REPO"
+
+# --- auto-detectar la arquitectura GPU (gfxNNNN) ---
+detect_gfx() {
+  local g=""
+  if command -v rocminfo >/dev/null 2>&1; then
+    g=$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)
+  fi
+  if [ -z "$g" ] && command -v amdgpu-arch >/dev/null 2>&1; then
+    g=$(amdgpu-arch 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)
+  fi
+  if [ -z "$g" ] && command -v offload-arch >/dev/null 2>&1; then
+    g=$(offload-arch 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)
+  fi
+  echo "$g"
+}
+GFX="${GFX_OVERRIDE:-$(detect_gfx)}"
+[ -n "$GFX" ] || GFX="gfx1100"   # último recurso: RDNA3 (RX 7900)
+echo "GFX=$GFX  (override con GFX=... si es incorrecto)"
+
+# ---------------------------------------------------------------------------
 echo "############ 1. Binario llama-server (HIP) ############"
-BIN=""
-for b in build/bin/llama-server build-hip/bin/llama-server; do
-  [ -x "$b" ] && BIN="$PWD/$b" && break
-done
-if [ -z "$BIN" ]; then
-  echo ">> No hay binario; compilando con HIP para $GFX (ROCWMMA FATTN OFF = baseline validado)..."
-  HIPCXX="$(hipconfig -l 2>/dev/null)/clang" cmake -S . -B build \
-    -DGGML_HIP=ON -DAMDGPU_TARGETS="$GFX" -DGGML_HIP_ROCWMMA_FATTN=OFF \
-    -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=OFF || { echo "!! cmake falló"; exit 1; }
-  cmake --build build --target llama-server -j"$(nproc)" || { echo "!! build falló"; exit 1; }
-  BIN="$PWD/build/bin/llama-server"
+# IMPORTANTE: usamos un dir DEDICADO build-hip/ para no reutilizar por error un
+# build CPU en build/ (eso correría en CPU y parecería que ROCm "funciona").
+BIN="$PWD/build-hip/bin/llama-server"
+NEED_BUILD=1
+if [ -x "$BIN" ]; then
+  # sólo reutilizar si ese binario está realmente enlazado a HIP/ROCm
+  if ldd "$BIN" 2>/dev/null | grep -qiE 'amdhip|hsa-runtime|rocm'; then
+    NEED_BUILD=0
+    echo ">> Reuso binario HIP existente: $BIN"
+  else
+    echo ">> build-hip/ existe pero el binario NO está enlazado a ROCm — recompilo."
+  fi
+fi
+
+if [ "$NEED_BUILD" = 1 ]; then
+  ROCWMMA_FLAG="OFF"; [ "$ROCWMMA" = 1 ] && ROCWMMA_FLAG="ON"
+  echo ">> Compilando HIP para $GFX (ROCWMMA FATTN=$ROCWMMA_FLAG)..."
+  HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+    cmake -S . -B build-hip \
+      -DGGML_HIP=ON \
+      -DGPU_TARGETS="$GFX" \
+      -DGGML_HIP_ROCWMMA_FATTN="$ROCWMMA_FLAG" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLLAMA_BUILD_TESTS=OFF \
+    || die "cmake (configuración HIP) falló — revisa que ROCm esté completo (rocm-dev/hip-dev)."
+  cmake --build build-hip --target llama-server -j"$(nproc)" \
+    || die "build HIP falló — mira los errores arriba (típico: falta rocm-device-libs o GPU_TARGETS incorrecto)."
+fi
+[ -x "$BIN" ] || die "No se generó el binario $BIN"
+
+echo ">> Verificando enlace ROCm del binario:"
+if ldd "$BIN" 2>/dev/null | grep -iE 'amdhip|hsa-runtime|rocm'; then
+  echo "   OK: llama-server está enlazado a ROCm."
+else
+  die "El binario NO está enlazado a ROCm (correría en CPU). Aborto para no dar un falso positivo."
 fi
 echo "BIN=$BIN"
 
+# ---------------------------------------------------------------------------
 echo "############ 2. Modelo 3B ############"
 mkdir -p "$MODEL_DIR"
-[ -f "$MODEL" ] || { echo ">> bajando 3B..."; curl -L --fail -o "$MODEL" "$MODEL_URL" || exit 1; }
+[ -f "$MODEL" ] || { echo ">> bajando 3B..."; curl -L --fail -o "$MODEL" "$MODEL_URL" || die "descarga del modelo falló"; }
 ls -lh "$MODEL"
 
+# ---------------------------------------------------------------------------
 echo "############ 3. Tasks (10 sample) ############"
 cat > "$PROMPTS_JSON" <<'JSON'
 [
@@ -62,11 +138,21 @@ run_sweep() { # $1=label  $2=ctk  $3=ctv  $4=fa
   "$BIN" -m "$MODEL" --port $PORT --host 127.0.0.1 -c 2048 -ngl 99 \
       -fa "$fa" --cache-type-k "$ctk" --cache-type-v "$ctv" >/tmp/srv_$PORT.log 2>&1 &
   local pid=$!
-  for i in $(seq 1 90); do
-    curl -s -m2 http://127.0.0.1:$PORT/health 2>/dev/null | grep -q ok && break
-    kill -0 $pid 2>/dev/null || { echo "!! server murió:"; tail -15 /tmp/srv_$PORT.log; return; }
+  local up=0
+  for i in $(seq 1 180); do   # HIP compila kernels al cargar: la 1a vez puede tardar
+    if curl -s -m2 http://127.0.0.1:$PORT/health 2>/dev/null | grep -q '"ok"\|ok'; then up=1; break; fi
+    kill -0 $pid 2>/dev/null || { echo "!! el server murió al arrancar:"; tail -20 /tmp/srv_$PORT.log; return; }
     sleep 1
   done
+  [ "$up" = 1 ] || { echo "!! el server no quedó healthy en 180s:"; tail -20 /tmp/srv_$PORT.log; kill $pid 2>/dev/null; return; }
+
+  # Confirmar que las capas REALMENTE se descargaron a GPU (no CPU fallback silencioso)
+  if grep -qiE 'offloaded .*layers to GPU|ROCm[0-9]|using ROCm' /tmp/srv_$PORT.log; then
+    grep -iE 'offloaded .*layers to GPU|ROCm[0-9].*:' /tmp/srv_$PORT.log | head -3 | sed 's/^/   [GPU] /'
+  else
+    echo "   (aviso: no vi confirmación de offload a GPU en el log — revisa /tmp/srv_$PORT.log)"
+  fi
+
   # warmup (absorbe la primera request)
   curl -s -m30 http://127.0.0.1:$PORT/v1/chat/completions -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"Hi"}],"max_tokens":8}' >/dev/null 2>&1
@@ -101,7 +187,9 @@ run_sweep "A f16 baseline"  f16  f16    on
 run_sweep "B TurboQuant"    q8_0 turbo3 on
 
 echo "############ RESUMEN — pégame esto ############"
-echo "GPU: $(rocminfo 2>/dev/null | grep -m1 'Marketing Name' | sed 's/.*: *//' || echo '?')"
-echo "Modelo: $(basename "$MODEL")"
-echo "Resultados turbo3 en: $OUT"
+echo "GPU     : $(rocminfo 2>/dev/null | grep -m1 'Marketing Name' | sed 's/.*: *//' || echo '?')"
+echo "GFX     : $GFX"
+echo "Binario : $BIN  ($(ldd "$BIN" 2>/dev/null | grep -oiE 'libamdhip[^ ]*' | head -1))"
+echo "Modelo  : $(basename "$MODEL")"
+echo "Salida  : $OUT (última config = turbo3)"
 echo "(arriba: por-tarea con segundos y preview; y el tiempo total de cada config)"
