@@ -4926,12 +4926,13 @@ static void ggml_compute_forward_set_rows_f32(
 
     ggml_from_float_t const from_float = ggml_get_type_traits_cpu(dst->type)->from_float;
 
-    // For turbo types: communicate WHT group size to the quantize function via global
+    // For turbo types: communicate the WHT group size to the quantize function (in ggml-base)
+    // via an exported setter. A bare cross-module `extern int` global does not link on
+    // Windows/GGML_BACKEND_DL (the symbol isn't exported from ggml-base.dll).
     if (dst->type == GGML_TYPE_TURBO3_0 || dst->type == GGML_TYPE_TURBO4_0 || dst->type == GGML_TYPE_TURBO2_0) {
-        extern int turbo3_cpu_wht_group_size;
         int gs = 0;
         memcpy(&gs, dst->op_params, sizeof(int));
-        turbo3_cpu_wht_group_size = (gs == 64 || gs == 128) ? gs : 0;
+        ggml_turbo_set_cpu_wht_group_size(gs);
     }
 
     for (int64_t i03 = 0; i03 < ne03; ++i03) {

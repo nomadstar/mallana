@@ -213,6 +213,15 @@ set_target_properties(ggml-base PROPERTIES
     SOVERSION ${GGML_VERSION_MAJOR}
 )
 
+# ggml-turbo-quant.c legitimately sanitizes non-finite (NaN/Inf) KV values before quantizing.
+# Some toolchains enable -ffast-math globally (IntelLLVM/oneAPI turns it on automatically), which
+# implies -ffinite-math-only: the compiler then assumes no float is NaN/Inf and deletes the
+# sanitization (even bit-level checks), letting non-finite values corrupt the cache — and
+# test-turbo-quant aborts on its isfinite() assert. Force NaN/Inf-honoring FP for just this file.
+if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|IntelLLVM")
+    set_source_files_properties(ggml-turbo-quant.c PROPERTIES COMPILE_OPTIONS "-fno-finite-math-only")
+endif()
+
 target_include_directories(ggml-base PRIVATE .)
 if (GGML_BACKEND_DL)
     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)

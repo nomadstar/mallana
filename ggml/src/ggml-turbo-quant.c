@@ -14,14 +14,34 @@
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <stdint.h>
+
+/* Finiteness check by raw exponent bits (all-ones exponent == Inf/NaN). The library isfinite()
+ * gets folded to a constant true under -ffinite-math-only, which silently deletes the NaN/Inf
+ * sanitization in the quantizer and lets non-finite values corrupt the KV cache (test-turbo-quant
+ * then aborts on its isfinite() assert). This bit form survives the milder -ffp-model=fast. It is
+ * NOT enough on its own under full -ffast-math (which also asserts -ffinite-math-only, letting the
+ * compiler assume every float is finite and fold even this) — so ggml-turbo-quant.c is additionally
+ * compiled with -fno-finite-math-only (see ggml/src/CMakeLists.txt). Belt and suspenders. */
+static inline int turbo_isfinite(float x) {
+    uint32_t u;
+    memcpy(&u, &x, sizeof(u));
+    return (u & 0x7f800000u) != 0x7f800000u;
+}
 
 /* MSVC's <math.h> only defines M_PI with _USE_MATH_DEFINES */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Global: WHT group size for CPU quantize path (set by CPU SET_ROWS handler) */
-int turbo3_cpu_wht_group_size = 0;
+/* WHT group size for CPU quantize path (set by CPU SET_ROWS handler via the exported
+ * setter below). File-scope static so it never needs to cross the base<->cpu DLL boundary
+ * as data — only the setter function does, which links cleanly on Windows/GGML_BACKEND_DL. */
+static int turbo3_cpu_wht_group_size = 0;
+
+void ggml_turbo_set_cpu_wht_group_size(int group_size) {
+    turbo3_cpu_wht_group_size = (group_size == 64 || group_size == 128) ? group_size : 0;
+}
 
 /* ---------- constants ---------- */
 
@@ -251,7 +271,6 @@ void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * G
 
     // Read WHT group size from global (set by CPU SET_ROWS handler before each call).
     // Fallback: 128 if row is 128-aligned, else 64.
-    extern int turbo3_cpu_wht_group_size;
     int group_size = turbo3_cpu_wht_group_size;
     if (group_size != 64 && group_size != 128) {
         group_size = (k % 128 == 0) ? 128 : 64;
@@ -349,7 +368,6 @@ size_t quantize_turbo3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT d
 void quantize_row_turbo2_0_ref(const float * GGML_RESTRICT x, block_turbo2_0 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TURBO2 == 0);
 
-    extern int turbo3_cpu_wht_group_size;
     int group_size = turbo3_cpu_wht_group_size;
     if (group_size != 64 && group_size != 128) {
         group_size = (k % 128 == 0) ? 128 : 64;
@@ -448,11 +466,11 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         /* Step 1: Extract norm */
         float norm_sq = 0.0f;
         for (int i = 0; i < d; i++) {
-            float val = isfinite(src[i]) ? src[i] : 0.0f;
+            float val = turbo_isfinite(src[i]) ? src[i] : 0.0f;
             norm_sq += val * val;
         }
         float norm = sqrtf(norm_sq);
-        if (!isfinite(norm)) {
+        if (!turbo_isfinite(norm)) {
             norm = 0.0f;
         }
 
@@ -461,7 +479,7 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         if (norm > 1e-10f) {
             const float inv = 1.0f / norm;
             for (int i = 0; i < d; i++) {
-                float val = isfinite(src[i]) ? src[i] : 0.0f;
+                float val = turbo_isfinite(src[i]) ? src[i] : 0.0f;
                 normalized[i] = val * inv;
             }
         } else {
@@ -493,7 +511,7 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         }
         float recon_norm = sqrtf(recon_norm_sq);
         float corrected_norm = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
-        if (!isfinite(corrected_norm)) {
+        if (!turbo_isfinite(corrected_norm)) {
             corrected_norm = 0.0f;
         }
         y[block].norm = GGML_FP32_TO_FP16(corrected_norm);
@@ -575,7 +593,7 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
     };
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
-        if (!isfinite(norm)) {
+        if (!turbo_isfinite(norm)) {
             norm = 0.0f;
         }
         float rotated[QK_TURBO4];
@@ -593,7 +611,7 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
     turbo_init_qjl();
     for (int block = 0; block < nb; block++) {
         float norm  = GGML_FP16_TO_FP32(x[block].norm);
-        if (!isfinite(norm)) {
+        if (!turbo_isfinite(norm)) {
             norm = 0.0f;
         }
 
@@ -615,7 +633,7 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
         }
 
         float rnorm = GGML_FP16_TO_FP32(x[block].rnorm);
-        if (!isfinite(rnorm)) {
+        if (!turbo_isfinite(rnorm)) {
             rnorm = 0.0f;
         }
         const float qjl_scale = TURBO_QJL_CONST / (float)d * rnorm;

@@ -354,6 +354,12 @@ GGML_API bool ggml_op_can_inplace(enum ggml_op op);
 GGML_API void * ggml_aligned_malloc(size_t size);
 GGML_API void ggml_aligned_free(void * ptr, size_t size);
 
+// TurboQuant: WHT group size for the CPU quantize path. Set by the CPU SET_ROWS handler
+// (in ggml-cpu) and read by the turbo quantize/dequantize code (in ggml-base). Exposed as a
+// function so the value crosses the base<->cpu DLL boundary cleanly — a plain cross-module
+// `extern int` global does not link on Windows/GGML_BACKEND_DL (symbol not exported).
+GGML_API void ggml_turbo_set_cpu_wht_group_size(int group_size);
+
 // FP16 <-> FP32
 // ref: https://github.com/Maratyszcza/FP16
 
