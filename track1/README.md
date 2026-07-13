@@ -26,11 +26,16 @@ larger, more accurate model — and a longer context — fits in the same RAM/VR
 per byte means more questions answered *well*, locally, at 0 tokens. On an accuracy-gated,
 token-minimizing leaderboard, running a stronger local model is exactly what breaks the tie.
 
-Status on AMD (Radeon gfx1100 / RDNA3, ROCm): full GPU offload of the model is validated and fast —
-the 3B runs all sample tasks coherently with `-ngl 99` at ~2 s/task. TurboQuant V-cache compression
-(`turbo3` / `turbo2`) under Flash Attention is now validated on this ROCm build —
-`scripts/amd-validate.sh` passes all 6 configurations. **The Track 1 submission ships TurboQuant
-enabled by default** (`q8_0` K + `turbo3` V) to maximize capability-density on-device.
+**Where TurboQuant applies — and where it doesn't.** Its win is *memory*: fitting a larger model or
+a longer context in the same VRAM. That matters on GPU. The Track 1 grader, however, runs
+**CPU-only** (2 vCPU / 4 GB), where a 3B already fits comfortably with lossless `f16` KV and the
+only score that matters is the LLM-judge accuracy gate (our token count is 0 either way). So the
+**submission image defaults to lossless `f16` KV with Flash Attention off** — the
+accuracy-and-reliability-max, fastest-on-CPU path — and leaves nothing to a lossy cache near the
+gate. TurboQuant remains a first-class GPU showcase: on AMD (Radeon gfx1100 / RDNA3, ROCm) the 3B
+runs all sample tasks coherently with `-ngl 99` at ~2 s/task, and `turbo3` / `turbo2` V-cache
+compression under Flash Attention is validated by `scripts/amd-validate.sh`. Enable it with
+`FLASH_ATTN=on CACHE_TYPE_K=q8_0 CACHE_TYPE_V=turbo3`.
 
 ## Submission contract
 
