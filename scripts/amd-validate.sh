@@ -77,20 +77,11 @@ echo "############ 1. Binario llama-server (HIP) ############"
 # IMPORTANTE: usamos un dir DEDICADO build-hip/ para no reutilizar por error un
 # build CPU en build/ (eso correría en CPU y parecería que ROCm "funciona").
 BIN="$PWD/build-hip/bin/llama-server"
-NEED_BUILD=1
-if [ -x "$BIN" ]; then
-  # sólo reutilizar si ese binario está realmente enlazado a HIP/ROCm
-  if ldd "$BIN" 2>/dev/null | grep -qiE 'amdhip|hsa-runtime|rocm'; then
-    NEED_BUILD=0
-    echo ">> Reuso binario HIP existente: $BIN"
-  else
-    echo ">> build-hip/ existe pero el binario NO está enlazado a ROCm — recompilo."
-  fi
-fi
+ROCWMMA_FLAG="OFF"; [ "$ROCWMMA" = 1 ] && ROCWMMA_FLAG="ON"
 
-if [ "$NEED_BUILD" = 1 ]; then
-  ROCWMMA_FLAG="OFF"; [ "$ROCWMMA" = 1 ] && ROCWMMA_FLAG="ON"
-  echo ">> Compilando HIP para $GFX (ROCWMMA FATTN=$ROCWMMA_FLAG)..."
+# Configura build-hip/ si no existe (primera vez). Si ya existe, NO reconfigures.
+if [ ! -f build-hip/CMakeCache.txt ]; then
+  echo ">> Configurando HIP para $GFX (ROCWMMA FATTN=$ROCWMMA_FLAG)..."
   HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
     cmake -S . -B build-hip \
       -DGGML_HIP=ON \
@@ -99,9 +90,14 @@ if [ "$NEED_BUILD" = 1 ]; then
       -DCMAKE_BUILD_TYPE=Release \
       -DLLAMA_BUILD_TESTS=OFF \
     || die "cmake (configuración HIP) falló — revisa que ROCm esté completo (rocm-dev/hip-dev)."
-  cmake --build build-hip --target llama-server -j"$(nproc)" \
-    || die "build HIP falló — mira los errores arriba (típico: falta rocm-device-libs o GPU_TARGETS incorrecto)."
 fi
+
+# SIEMPRE compilar (incremental): si nada cambió es casi instantáneo; si tocamos un .cu/.cuh,
+# recompila SÓLO eso. Esto evita el fantasma de "binario stale" — el bug que parece no arreglarse
+# porque en realidad probamos el binario viejo. Es CLAVE para el loop editar→rebuild→probar.
+echo ">> Compilando (incremental) llama-server con HIP..."
+cmake --build build-hip --target llama-server -j"$(nproc)" \
+  || die "build HIP falló — mira los errores arriba (típico: falta rocm-device-libs o GPU_TARGETS incorrecto)."
 [ -x "$BIN" ] || die "No se generó el binario $BIN"
 
 echo ">> Verificando enlace ROCm del binario:"
