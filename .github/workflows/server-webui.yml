@@ -1,30 +1,9 @@
 name: Server WebUI
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-  workflow_dispatch: # allows manual triggering
-    inputs:
-      sha:
-        description: 'Commit SHA1 to build'
-        required: false
-        type: string
-  push:
-    branches:
-      - master
-    paths: [
-      '.github/workflows/server-webui.yml',
-      'tools/server/webui/**.*',
-      'tools/server/tests/**.*',
-      'tools/server/public/**'
-    ]
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths: [
-      '.github/workflows/server-webui.yml',
-      'tools/server/webui/**.*',
-      'tools/server/tests/**.*',
-      'tools/server/public/**'
-    ]
-
+  workflow_dispatch:
 env:
   LLAMA_LOG_COLORS: 1
   LLAMA_LOG_PREFIX: 1
@@ -106,3 +85,4 @@ jobs:
         if: ${{ always() && steps.playwright.conclusion == 'success' }}
         run: npm run test:e2e
         working-directory: tools/server/webui
+

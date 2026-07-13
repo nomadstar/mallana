@@ -1,19 +1,9 @@
 name: Python check requirements.txt
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-  push:
-    paths:
-      - '.github/workflows/python-check-requirements.yml'
-      - 'scripts/check-requirements.sh'
-      - 'convert*.py'
-      - '**/requirements*.txt'
-  pull_request:
-    paths:
-      - '.github/workflows/python-check-requirements.yml'
-      - 'scripts/check-requirements.sh'
-      - 'convert*.py'
-      - '**/requirements*.txt'
-
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -31,3 +21,4 @@ jobs:
           python-version: "3.11"
       - name: Run check-requirements.sh script
         run:  bash scripts/check-requirements.sh
+

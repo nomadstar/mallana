@@ -1,20 +1,20 @@
 name: Python Type-Check
 
+# mallana fork: type-check only the fork's own app code (track1 — the agent/router, stdlib-only,
+# no heavy deps). The mixed research scripts under scripts/ are intentionally untyped, so they are
+# not type-checked here. Triggers only when the app code (or ty config) changes.
 on:
   push:
     paths:
       - '.github/workflows/python-type-check.yml'
       - 'ty.toml'
-      - '**.py'
-      - '**/requirements*.txt'
-      # - 'pyrightconfig.json'
+      - 'track1/**.py'
   pull_request:
     paths:
       - '.github/workflows/python-type-check.yml'
       - 'ty.toml'
-      - '**.py'
-      - '**/requirements*.txt'
-      # - 'pyrightconfig.json'
+      - 'track1/**.py'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -31,13 +31,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-          pip-install: -r requirements/requirements-all.txt ty==0.0.24
-      # - name: Type-check with Pyright
-      #   uses: jakebailey/pyright-action@v2
-      #   with:
-      #     version: 1.1.382
-      #     level: warning
-      #     warnings: true
+          pip-install: ty==0.0.24
       - name: Type-check with ty
         run: |
-            ty check --output-format=github
+            # Fork app code is stdlib-only; no requirements install needed.
+            ty check --output-format=github track1

@@ -1,19 +1,26 @@
 name: flake8 Lint
 
+# mallana fork: lint only the fork's OWN Python (the track1 agent/router and our scripts),
+# not the whole inherited upstream tree. Triggers only when that Python (or its config) changes.
 on:
   push:
     branches:
       - master
     paths: [
       '.github/workflows/python-lint.yml',
-      '**/*.py'
+      '.flake8',
+      'track1/**.py',
+      'scripts/**.py'
     ]
   pull_request:
     types: [opened, synchronize, reopened]
     paths: [
       '.github/workflows/python-lint.yml',
-      '**/*.py'
+      '.flake8',
+      'track1/**.py',
+      'scripts/**.py'
     ]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -30,7 +37,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: flake8 Lint
-        uses: py-actions/flake8@v2
-        with:
-            plugins: "flake8-no-print"
+      - name: flake8 Lint (fork Python only)
+        run: |
+          python -m pip install --upgrade flake8 flake8-no-print
+          # Scope to the fork's own Python; .flake8 (repo root) is auto-discovered.
+          flake8 track1 scripts

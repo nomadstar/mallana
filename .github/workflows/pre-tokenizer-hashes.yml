@@ -1,15 +1,9 @@
 name: Check Pre-Tokenizer Hashes
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-    push:
-        paths:
-            - 'convert_hf_to_gguf.py'
-            - 'convert_hf_to_gguf_update.py'
-    pull_request:
-        paths:
-            - 'convert_hf_to_gguf.py'
-            - 'convert_hf_to_gguf_update.py'
-
+  workflow_dispatch:
 jobs:
     pre-tokenizer-hashes:
         runs-on: ubuntu-slim
@@ -43,3 +37,4 @@ jobs:
                   exit 1
               fi
               echo "Model pre-tokenizer hashes are up to date."
+

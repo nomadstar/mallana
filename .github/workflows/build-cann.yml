@@ -1,27 +1,9 @@
 name: CI (cann)
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-  workflow_dispatch: # allows manual triggering
-  push:
-    branches:
-      - master
-    paths: [
-      '.github/workflows/build-cann.yml',
-      '**/CMakeLists.txt',
-      '**/.cmake',
-      '**/*.h',
-      '**/*.hpp',
-      '**/*.c',
-      '**/*.cpp'
-    ]
-
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths: [
-      '.github/workflows/build-cann.yml',
-      'ggml/src/ggml-cann/**'
-    ]
-
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -100,3 +82,4 @@ jobs:
 
               chown -R '"${HOST_UID}"':'"${HOST_GID}"' /workspace/build
             '
+

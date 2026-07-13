@@ -10,14 +10,10 @@
 
 name: Upload Python Package
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
   workflow_dispatch:
-  push:
-    # Pattern matched against refs/tags
-    tags:
-      - 'gguf-v*'           # Push events to every version tag
-
-
 jobs:
   deploy:
 
@@ -42,3 +38,4 @@ jobs:
       with:
         password: ${{ secrets.PYPI_API_TOKEN }}
         packages-dir: gguf-py/dist
+

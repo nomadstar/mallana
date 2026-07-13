@@ -1,19 +1,9 @@
 name: EditorConfig Checker
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-  workflow_dispatch: # allows manual triggering
-    inputs:
-      create_release:
-        description: 'Create new release'
-        required: true
-        type: boolean
-  push:
-    branches:
-      - master
-  pull_request:
-    branches:
-      - master
-
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -27,3 +17,4 @@ jobs:
         with:
           version: v3.0.3
       - run: editorconfig-checker
+

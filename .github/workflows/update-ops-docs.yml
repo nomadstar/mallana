@@ -1,17 +1,9 @@
 name: Update Operations Documentation
 
+# Auto-run disabled for the mallana fork: this upstream workflow needs infra
+# the fork doesn't have. Run it manually from the Actions tab if needed.
 on:
-    push:
-        paths:
-            - 'docs/ops.md'
-            - 'docs/ops/**'
-            - 'scripts/create_ops_docs.py'
-    pull_request:
-        paths:
-            - 'docs/ops.md'
-            - 'docs/ops/**'
-            - 'scripts/create_ops_docs.py'
-
+  workflow_dispatch:
 jobs:
     update-ops-docs:
         runs-on: ubuntu-slim
@@ -40,3 +32,4 @@ jobs:
                   exit 1
               fi
               echo "Operations documentation is up to date."
+
