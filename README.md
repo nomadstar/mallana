@@ -163,6 +163,18 @@ All existing llama.cpp quantization types, model architectures, and backends con
 unchanged (when using standard quantization types). TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
 Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Other backends (like Vulkan, SYCL, WebGPU) do not yet support TurboQuant and will trigger errors or fallbacks if TurboQuant is enabled on them.
 
+### Why this exists
+
+This repository is not simply a TurboQuant fork — it is a research platform built around one
+question: **how much useful intelligence can we run on the hardware people already own?** Rather
+than asking how to make models larger, we ask how to make existing hardware capable of running
+larger and better models, by reducing the *cost of intelligence itself* — every byte of memory,
+every cache line, every tensor op, every watt. TurboQuant is the first technique down that path;
+quantization, attention, KV-cache systems, decoding, and execution are all in scope, provided they
+compose cleanly, preserve correctness across supported backends, and stay responsive on the
+hardware real users own. The full vision and the principles that gate every optimization live in
+the **[Manifesto](MANIFESTO.md)**.
+
 ---
 
 ## Current Status
