@@ -88,14 +88,18 @@ ENV FLASH_ATTN=off
 ENV CACHE_TYPE_K=f16
 ENV CACHE_TYPE_V=f16
 ENV CTX_SIZE=2048
-# 768 leaves room for multi-step reasoning to finish (256 truncated math/explanation answers).
-ENV MAX_TOKENS=768
+# Sized for the ~2 vCPU grader (~10-15 tok/s): a big cap makes the model write 60s+ essays that
+# blow the wall-clock budget → SIGKILL → RUNTIME_ERROR. 256 + a concise system prompt keeps every
+# task to a few seconds. Streaming keeps a partial answer if a task still hits its timeout.
+ENV MAX_TOKENS=256
 # Low-but-nonzero temp for deterministic-ish tasks; penalties off (they distort exact-format asks).
 ENV TEMPERATURE=0.3
 ENV FREQUENCY_PENALTY=0.0
 ENV PRESENCE_PENALTY=0.0
-ENV PER_TASK_TIMEOUT=30
-ENV GLOBAL_DEADLINE=900
+# Per-task budget well under any plausible grader limit; global deadline self-terminates the run
+# gracefully (writing a complete results.json) BEFORE the grader can SIGKILL an over-budget run.
+ENV PER_TASK_TIMEOUT=25
+ENV GLOBAL_DEADLINE=240
 ENV TASK_INPUT_PATH=/input/tasks.json
 ENV TASK_OUTPUT_PATH=/output/results.json
 

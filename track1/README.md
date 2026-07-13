@@ -93,7 +93,10 @@ For interactive use, `router.py` exposes the same local model over an OpenAI-com
 | `CACHE_TYPE_K` | `f16` | K cache type (`q8_0` to compress) |
 | `CACHE_TYPE_V` | `f16` | V cache type (`turbo3` for TurboQuant 6.4× compression, needs `-fa on`) |
 | `FLASH_ATTN` | `off` | Flash Attention (`on` to enable TurboQuant's compressed V-cache) |
-| `MAX_TOKENS` | `768` | Max generated tokens per task |
+| `MAX_TOKENS` | `256` | Max generated tokens per task (sized for the ~2 vCPU grader) |
+| `SYSTEM_PROMPT` | *(concise default)* | Instructs the model to answer directly — no essays |
+| `PER_TASK_TIMEOUT` | `25` | Per-task wall-clock budget; a timeout keeps the streamed partial answer |
+| `GLOBAL_DEADLINE` | `240` | Whole-run budget; self-terminates cleanly before the grader can SIGKILL |
 | `TEMPERATURE` | `0.3` | Sampling temperature |
 | `CTX_SIZE` | `2048` | Context window |
 | `LLAMA_NGL` | `99` | GPU layers to offload (ignored on CPU-only builds) |
