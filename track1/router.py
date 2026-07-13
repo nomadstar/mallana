@@ -23,6 +23,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+import glob
 import subprocess
 import time
 import threading
@@ -70,17 +71,26 @@ else:
                 break
     LD_LIBRARY_PATH_ENV = os.path.join(repo_root, "build/bin")
 
-# Resolve the model path.
+# Resolve the model path. LOCAL_MODEL_PATH wins; otherwise scan common locations for
+# any *.gguf. We deliberately SKIP known-bad test models: qwen2.5-coder-1.5b-bf16 is a
+# weak, fp-fragile model that collapses into repetition loops under any lossy KV and has
+# repeatedly masqueraded as a "TurboQuant bug" — never auto-serve it. If nothing valid is
+# found we keep LOCAL_MODEL_PATH so start_local_server() fails loudly rather than serving
+# garbage from the wrong model.
+_BAD_MODELS = {"qwen2.5-coder-1.5b-bf16.gguf"}
 if os.path.exists(LOCAL_MODEL_PATH):
     resolved_model_path = LOCAL_MODEL_PATH
 else:
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    resolved_model_path = LOCAL_MODEL_PATH
-    for m in [os.path.join(repo_root, "qwen2.5-coder-1.5b-bf16.gguf"),
-              os.path.join(repo_root, "models/your-model.gguf")]:
-        if os.path.exists(m):
-            resolved_model_path = m
-            break
+    resolved_model_path = LOCAL_MODEL_PATH  # fail-loud default
+    candidates = sorted(glob.glob(os.path.join(repo_root, "*.gguf")) +
+                        glob.glob(os.path.join(repo_root, "models", "*.gguf")))
+    for m in candidates:
+        if os.path.basename(m) in _BAD_MODELS:
+            log(f"skipping known-bad test model: {os.path.basename(m)}")
+            continue
+        resolved_model_path = m
+        break
 
 
 def check_local_health():

@@ -11,8 +11,9 @@ MODEL="${MODEL:-}"
 
 if [ -z "$KNOWN_GOOD_GEN_MODEL" ]; then
     echo -e "${YELLOW}validate-runtime: set KNOWN_GOOD_GEN_MODEL=/path/to/known-good.gguf.${RESET}"
-    echo "Example:"
-    echo "  KNOWN_GOOD_GEN_MODEL=/tmp/opencode/models/Qwen2.5-Coder-1.5B-Instruct-GGUF/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf scripts/validate-runtime.sh"
+    echo "Example (use a ROBUST instruct model as the reference — NOT a coder-1.5b, which is"
+    echo " fp-fragile and collapses into loops under any lossy KV, faking a runtime bug):"
+    echo "  KNOWN_GOOD_GEN_MODEL=~/models/qwen2.5-3b-instruct-q4_k_m.gguf scripts/validate-runtime.sh"
     exit 2
 fi
 

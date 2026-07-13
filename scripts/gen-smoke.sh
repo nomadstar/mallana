@@ -53,21 +53,52 @@ try: print(json.load(sys.stdin)['choices'][0]['message']['content'].lower())
 except Exception: print('__error__')"
 }
 
+looks_garbage() {  # $1 = answer text ; exit 0 (true) if it looks like a repetition loop / garbage.
+    # Ported from scripts/amd-validate.sh so both validators share ONE objective criterion. A pure
+    # substring check ("does the answer contain 'toast'?") is fooled by a loop that repeats the
+    # keyword ("toast toast toast…") — the exact failure mode this smoke test claims to catch.
+    python3 - "$1" <<'PY'
+import sys, re
+from collections import Counter
+s = sys.argv[1] if len(sys.argv) > 1 else ""
+def looks_garbage(s):
+    if not s: return False
+    if len(s) >= 20:
+        letters = sum(c.isalpha() or c.isspace() for c in s)
+        if letters/len(s) < 0.60: return True            # non-text junk
+    toks = re.findall(r"\w+", s.lower())
+    run = 1                                              # 3+ identical tokens in a row = loop
+    for i in range(1, len(toks)):
+        run = run+1 if toks[i] == toks[i-1] else 1
+        if run >= 3: return True
+    if len(toks) >= 4:
+        top, n = Counter(toks).most_common(1)[0]
+        if n >= 4 and n > 0.35*len(toks): return True    # one token dominates
+        if len(toks) >= 8 and len(set(toks))/len(toks) < 0.25: return True
+    return False
+sys.exit(0 if looks_garbage(s) else 1)
+PY
+}
+
 FAIL=0
 
 # COLD first request. An open-ended instruction like this reliably regressed to
 # repeated-token garbage ("etheus etheus...") on the cold request while short high-probability
 # completions sometimes survived — so this is the sensitive, load-bearing check.
 A1=$(ask "Name three uses for a toaster in one line.")
-if echo "$A1" | grep -qiE "toast|bread|bagel|heat|warm"; then
+if looks_garbage "$A1"; then
+    echo -e "  ${RED}FAIL cold request: repetition-loop/garbage, got: ${A1:0:120}${RESET}"; FAIL=1
+elif echo "$A1" | grep -qiE "toast|bread|bagel|heat|warm"; then
     echo -e "  ${GREEN}PASS cold request: coherent toaster answer${RESET}"
 else
-    echo -e "  ${RED}FAIL cold request: garbage/incoherent, got: ${A1:0:120}${RESET}"; FAIL=1
+    echo -e "  ${RED}FAIL cold request: incoherent, got: ${A1:0:120}${RESET}"; FAIL=1
 fi
 
 # WARM second request — sanity that ongoing generation stays coherent.
 A2=$(ask "What is 2+2? Reply with only the number.")
-if echo "$A2" | grep -q "4"; then
+if looks_garbage "$A2"; then
+    echo -e "  ${RED}FAIL warm request: repetition-loop/garbage, got: ${A2:0:120}${RESET}"; FAIL=1
+elif echo "$A2" | grep -q "4"; then
     echo -e "  ${GREEN}PASS warm request: contains '4'${RESET}"
 else
     echo -e "  ${RED}FAIL warm request: expected '4', got: ${A2:0:120}${RESET}"; FAIL=1

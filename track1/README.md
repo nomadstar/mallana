@@ -91,8 +91,18 @@ LOCAL_MODEL_PATH=/path/to/model.gguf python3 track1/agent.py
 ## Live-server alternative (`router.py`)
 
 For interactive use, `router.py` exposes the same local model over an OpenAI-compatible API
-(`/v1/chat/completions`, `/v1/models`, `/health`). It is **not** the submission entrypoint —
-`agent.py` (the batch contract) is.
+(`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`) with streaming. It is
+**not** the submission entrypoint — `agent.py` (the batch contract) is.
+
+```bash
+LOCAL_MODEL_PATH=/path/to/model.gguf python3 track1/router.py   # serves on :8080
+```
+
+It resolves the model from `LOCAL_MODEL_PATH`, then the baked `/app/model.gguf`, then any
+`*.gguf` under the repo / `models/`, and **fails loudly** if none is found — it will never
+silently serve a wrong or known-weak model. Defaults to the TurboQuant GPU showcase config
+(`-fa on`, `CACHE_TYPE_K=q8_0`, `CACHE_TYPE_V=turbo3`, `LLAMA_NGL=99`); on a CPU-only box use
+`CACHE_TYPE_K=f16 CACHE_TYPE_V=f16` for the lossless path.
 
 ## Configuration (all optional, all local)
 

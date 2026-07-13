@@ -541,6 +541,10 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
 int main(int argc, char ** argv) {
     // FIXME these tests are disabled in the CI for macOS-latest-cmake-arm64 because they are segfaulting
     common_init();
+    // With GGML_BACKEND_DL the backends are separate shared libs that must be
+    // loaded explicitly; without this the test sees 0 devices ("no backends are
+    // loaded") and fails. No-op / harmless in statically-linked builds.
+    ggml_backend_load_all();
     std::random_device rd;
 
     llm_arch arch = LLM_ARCH_UNKNOWN;
