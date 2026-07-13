@@ -349,32 +349,34 @@ static __global__ void k_set_rows_turbo3(
     const float rv = x[j];
     const uint8_t idx = turbo_nearest_centroid_3bit(rv);
 
-    // ---- Step 6: Pack qs and signs (warp-cooperative, no atomics) ----
-    // Each warp handles 32 elements. With QK_TURBO3 > WARP_SIZE, multiple warps
-    // share one block and write to different byte offsets within it.
-    const int lane    = j % WARP_SIZE;
+    // ---- Step 6: Pack qs and signs via shared memory (warp-size independent) ----
+    // The original packing used __shfl_sync + __ballot_sync assuming a 32-lane warp. On AMD
+    // __ballot_sync returns a 64-bit mask and `lane = j % WARP_SIZE(32)` mis-maps elements
+    // 32-63 of a 64-wide wavefront, so the stored signs were corrupted → turbo3 gibberish /
+    // turbo2 crash on gfx1100. Assemble each packed byte from a shared idx array instead: no
+    // lane arithmetic, correct for wave32 and wave64 alike.
     const int elem_in_block = j % QK_TURBO3;
     block_turbo3_0 * blk = blk_base + (j / QK_TURBO3);
 
-    // Pack qs: 4 elements per byte, 2 bits each.
-    // All 4 threads in a qs-group gather their low2 bits via shuffle.
-    const int qs_byte_idx = elem_in_block / 4;
-    const uint8_t my_low2 = idx & 0x3;
-    uint8_t qs_byte = 0;
-#pragma unroll
-    for (int k = 0; k < 4; k++) {
-        uint8_t contrib = __shfl_sync(0xffffffff, my_low2, (lane & ~3) + k, WARP_SIZE);
-        qs_byte |= contrib << (k * 2);
-    }
-    if (lane % 4 == 0) blk->qs[qs_byte_idx] = qs_byte;
+    __shared__ uint8_t s_idx[GROUP_SIZE];
+    s_idx[j] = idx;
+    __syncthreads();
 
-    // Pack signs: 8 elements per byte, 1 bit each.  __ballot_sync across warp.
-    // Ballot is per-warp (32 bits); extract local byte, write to global position in block.
-    const uint32_t ballot = __ballot_sync(0xffffffff, (idx >> 2) & 1);
-    const int local_signs_byte = lane / 8;             // byte within 32-bit ballot (0..3)
-    const int global_signs_byte = elem_in_block / 8;   // byte within block's signs array
-    const uint8_t signs_byte = (uint8_t)((ballot >> (local_signs_byte * 8)) & 0xFF);
-    if (lane % 8 == 0) blk->signs[global_signs_byte] = signs_byte;
+    // qs: one thread per 4-element sub-group packs 4×2-bit indices into one byte.
+    if (elem_in_block % 4 == 0) {
+        uint8_t qs_byte = 0;
+#pragma unroll
+        for (int k = 0; k < 4; k++) qs_byte |= (uint8_t)(s_idx[j + k] & 0x3) << (k * 2);
+        blk->qs[elem_in_block / 4] = qs_byte;
+    }
+    // signs: one thread per 8-element sub-group packs 8×1 high bits into one byte.
+    if (elem_in_block % 8 == 0) {
+        uint8_t signs_byte = 0;
+#pragma unroll
+        for (int k = 0; k < 8; k++) signs_byte |= (uint8_t)((s_idx[j + k] >> 2) & 0x1) << k;
+        blk->signs[elem_in_block / 8] = signs_byte;
+    }
+    __syncthreads();  // s_idx reused as a plain buffer; ensure all reads done before step 7 reuse
 
     // ---- Step 7: Reconstruction norm (parallel, same pattern as step 2) ----
     const float c = TURBO_CENTROIDS_3BIT[idx];
@@ -485,22 +487,34 @@ static __global__ void k_set_rows_turbo3_tail(
     // ---- Quantize ----
     const uint8_t idx = turbo_nearest_centroid_3bit(rv);
 
-    // ---- Pack qs and signs (same warp-cooperative logic) ----
-    block_turbo3_0 * blk = blk_base + warp_id;
+    // ---- Pack qs and signs via shared memory (warp-size independent) ----
+    __shared__ uint8_t s_idx[128];
+    s_idx[j] = idx;
+    __syncthreads();
 
-    const uint8_t my_low2 = idx & 0x3;
-    uint8_t qs_byte = 0;
+    const int elem_in_block = j % 32;
+    block_turbo3_0 * blk = blk_base + (j / 32);
+
+    // qs: one thread per 4-element sub-group packs 4x2-bit indices into one byte.
+    if (elem_in_block % 4 == 0) {
+        uint8_t qs_byte = 0;
 #pragma unroll
-    for (int k = 0; k < 4; k++) {
-        uint8_t contrib = __shfl_sync(0xffffffff, my_low2, (lane & ~3) + k, WARP_SIZE);
-        qs_byte |= contrib << (k * 2);
+        for (int k = 0; k < 4; k++) {
+            qs_byte |= (uint8_t)(s_idx[j + k] & 0x3) << (k * 2);
+        }
+        blk->qs[elem_in_block / 4] = qs_byte;
     }
-    if (lane % 4 == 0) blk->qs[lane / 4] = qs_byte;
 
-    const uint32_t ballot = __ballot_sync(0xffffffff, (idx >> 2) & 1);
-    const int signs_byte_idx = lane / 8;
-    const uint8_t signs_byte = (uint8_t)((ballot >> (signs_byte_idx * 8)) & 0xFF);
-    if (lane % 8 == 0) blk->signs[signs_byte_idx] = signs_byte;
+    // signs: one thread per 8-element sub-group packs 8x1 high bits into one byte.
+    if (elem_in_block % 8 == 0) {
+        uint8_t signs_byte = 0;
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+            signs_byte |= (uint8_t)((s_idx[j + k] >> 2) & 0x1) << k;
+        }
+        blk->signs[elem_in_block / 8] = signs_byte;
+    }
+    __syncthreads();  // s_idx reused as a plain buffer
 
     // ---- Reconstruction norm ----
     const float c = TURBO_CENTROIDS_3BIT[idx];
@@ -760,24 +774,25 @@ static __global__ void k_set_rows_turbo2(
     const float rv = x[j];
     const uint8_t idx = turbo_nearest_centroid_2bit(rv);
 
-    // ---- Step 6: Pack qs (warp-cooperative, no atomics) ----
-    // Each warp handles 32 elements. With QK_TURBO2 > WARP_SIZE, multiple warps
-    // share one block and write to different byte offsets within it.
-    const int lane    = j % WARP_SIZE;
+    // ---- Step 6: Pack qs via shared memory (warp-size independent) ----
+    // The original __shfl_sync packing assumed a 32-lane warp (`lane = j % WARP_SIZE`), which
+    // mis-maps elements on AMD 64-wide wavefronts and corrupted the stored qs (turbo2 gibberish/
+    // crash on gfx1100). Assemble each byte from a shared idx array — no lane arithmetic.
     const int elem_in_block = j % QK_TURBO2;
     block_turbo2_0 * blk = blk_base + (j / QK_TURBO2);
 
-    // Pack qs: 4 elements per byte, 2 bits each.
-    const uint8_t my_bits = idx & 0x3;
-    uint8_t qs_byte = 0;
-#pragma unroll
-    for (int k = 0; k < 4; k++) {
-        uint8_t contrib = __shfl_sync(0xffffffff, my_bits, (lane & ~3) + k, WARP_SIZE);
-        qs_byte |= contrib << (k * 2);
-    }
-    if (lane % 4 == 0) blk->qs[elem_in_block / 4] = qs_byte;
+    __shared__ uint8_t s_idx[GROUP_SIZE];
+    s_idx[j] = idx & 0x3;
+    __syncthreads();
 
-    // No signs packing needed for turbo2
+    // qs: one thread per 4-element sub-group packs 4×2-bit indices into one byte.
+    if (elem_in_block % 4 == 0) {
+        uint8_t qs_byte = 0;
+#pragma unroll
+        for (int k = 0; k < 4; k++) qs_byte |= (uint8_t)(s_idx[j + k] & 0x3) << (k * 2);
+        blk->qs[elem_in_block / 4] = qs_byte;
+    }
+    __syncthreads();  // s_idx reused as a plain buffer; finish reads before step 7
 
     // ---- Step 7: Reconstruction norm ----
     const float c = TURBO_CENTROIDS_2BIT[idx];
@@ -879,17 +894,24 @@ static __global__ void k_set_rows_turbo2_tail(
     // ---- Quantize ----
     const uint8_t idx = turbo_nearest_centroid_2bit(rv);
 
-    // ---- Pack qs ----
-    block_turbo2_0 * blk = blk_base + warp_id;
+    // ---- Pack qs via shared memory (warp-size independent) ----
+    __shared__ uint8_t s_idx[128];
+    s_idx[j] = idx & 0x3;
+    __syncthreads();
 
-    const uint8_t my_bits = idx & 0x3;
-    uint8_t qs_byte = 0;
+    const int elem_in_block = j % 32;
+    block_turbo2_0 * blk = blk_base + (j / 32);
+
+    // qs: one thread per 4-element sub-group packs 4x2-bit indices into one byte.
+    if (elem_in_block % 4 == 0) {
+        uint8_t qs_byte = 0;
 #pragma unroll
-    for (int k = 0; k < 4; k++) {
-        uint8_t contrib = __shfl_sync(0xffffffff, my_bits, (lane & ~3) + k, WARP_SIZE);
-        qs_byte |= contrib << (k * 2);
+        for (int k = 0; k < 4; k++) {
+            qs_byte |= (uint8_t)(s_idx[j + k] & 0x3) << (k * 2);
+        }
+        blk->qs[elem_in_block / 4] = qs_byte;
     }
-    if (lane % 4 == 0) blk->qs[lane / 4] = qs_byte;
+    __syncthreads();
 
     // ---- Reconstruction norm ----
     const float c = TURBO_CENTROIDS_2BIT[idx];
@@ -1094,18 +1116,18 @@ static __global__ void k_set_rows_turbo4(
     const float rv = x[j];
     const uint8_t idx = turbo_nearest_centroid_4bit(rv);
 
-    // ---- Step 6: Pack qs (nibble packed, warp-cooperative) ----
+    // ---- Step 6: Pack qs via shared memory (warp-size independent) ----
     // 2 elements per byte, 4 bits each.
     // Thread pairs (j, j+1) share a qs byte.
-    const int lane = j % WARP_SIZE;
-    const uint8_t my_nibble = idx & 0xF;
-    uint8_t qs_byte = 0;
-    // Gather nibble from partner thread
-    uint8_t partner_nibble = __shfl_sync(0xffffffff, my_nibble, lane ^ 1, WARP_SIZE);
+    __shared__ uint8_t s_idx[128];
+    s_idx[j] = idx & 0xF;
+    __syncthreads();
+
     if (j % 2 == 0) {
-        qs_byte = my_nibble | (partner_nibble << 4);
+        uint8_t qs_byte = (s_idx[j] & 0xF) | ((s_idx[j + 1] & 0xF) << 4);
         blk->qs[j / 2] = qs_byte;
     }
+    __syncthreads();
 
     // ---- Step 7: Reconstruction norm (parallel) ----
     const float c = TURBO_CENTROIDS_4BIT[idx];
