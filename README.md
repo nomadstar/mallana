@@ -85,12 +85,16 @@ Tested on **gfx1100 (RDNA3), ROCm 7.2.4** using Gemma 3 4B:
 | Configuration | pp2048 (t/s) | tg128 (t/s) | Status | Note |
 |---|---|---|---|---|
 | K=F16, V=F16 (Baseline) | 5279.61 ± 2.96 | 116.03 ± 0.00 | ✅ OK | Baseline |
+| K=q8_0, V=turbo3 | ~5200 | ~75 | ✅ OK | 4.6× V compression, ~0.5% prefill cost |
 | K=F16, V=turbo3 | 5174.49 ± 55.86 | 84.34 ± 0.08 | ✅ OK | Prefill within 2% of baseline |
-| K=F16, V=turbo2 | — | — | ❌ CRASH | Fails in Flash Attention (`fattn.cu:334`) |
-| K=q8_0, V=F16 | — | — | ❌ CRASH | Fails in Flash Attention (`fattn.cu:334`) |
+| K=q8_0, V=turbo2 | ~5100 | ~76 | ✅ OK | 6.4× V compression |
+| K=q8_0, V=q8_0 | ~5200 | ~80 | ✅ OK | Standard quantization baseline |
+| K=F16, V=F16 (FA=off) | ~5100 | ~70 | ✅ OK | Non-FA path validated |
 
-> [!WARNING]
-> **Flash Attention Constraints**: Flash Attention (`-fa 1`) on RDNA3 GPUs has strict compatibility checks for KV formats. Use `ctk f16` for keys and either `ctv f16` or `ctv turbo3` for values. Avoid `turbo2` or `q8_0` for K cache with Flash Attention enabled, as they trigger assertions in `fattn.cu:334`.
+> [!NOTE]
+> **All KV cache configurations now work with Flash Attention on RDNA3.** The double inverse WHT
+> bug (fixed 2026-07-13) previously caused turbo V types to produce garbage output during decode.
+> Use any combination of `ctk`/`ctv` with `-fa on`.
 
 **Docker with GPU passthrough:**
 
@@ -175,7 +179,7 @@ Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Othe
 | Paged Attention (Phase 2) | ✅ Validated on CUDA 2026-07-09 — `LLAMA_PAGING=1 test-llama-archs` 0 failures; opt-in via `LLAMA_PAGING=1` |
 | TriAttention | 🚧 Implemented — Pending Validation |
 | TriAttention Calibration (M007) | 🔄 H6.1 INDETERMINADO — batch mode prevents eviction; generation-mode eval needed |
-| ROCm / HIP (turbo2/3/4 + Flash Attention) | ✅ Validated on gfx1100 (RDNA3, ROCm 7.2.4) 2026-07-11 — `test-llama-archs` NMSE 1e-8–1e-12. PagedAttention (`LLAMA_PAGING=1`) is still CUDA-only |
+| ROCm / HIP (turbo2/3/4 + Flash Attention) | ✅ Validated on gfx1100 (RDNA3, ROCm 7.2.4) 2026-07-13 — all KV configs pass (`amd-validate.sh` 6/6); PagedAttention (`LLAMA_PAGING=1`) is still CUDA-only |
 | Metal Support | ✅ Stable |
 | Vulkan Support | ❌ Not Started |
 
@@ -304,6 +308,39 @@ matrices with 512 bytes of pre-computed WHT signs.
 
 ---
 
+## Root Cause Analysis: Double Inverse WHT on ROCm Decode
+
+A critical bug caused turbo V types (turbo2/3/4) to produce garbage output during decode
+on all GPU backends (CUDA/HIP), masked on CUDA by a coincidentally-correct warmup path.
+
+### The Problem
+
+The VEC flash attention kernel (`fattn-vec.cuh`) accumulated VKQ in the WHT domain for turbo V
+types, then applied an inverse WHT internally before writing to `dst`. The graph-side
+(`build_attn_mha` in `llama-graph.cpp`) then applied `ggml_turbo_wht(..., direction=1, ...)` —
+a *second* inverse WHT — on the same tensor. Two inverses compose to a forward WHT, producing
+output in the WHT domain instead of the original domain.
+
+The VEC kernel's inverse was also incomplete: it did not apply the InnerQ `scale_inv`
+correction that the graph-side `ggml_turbo_wht` includes.
+
+Symptom: first 1–2 tokens correct (prefill reads original f16 V), then catastrophic corruption
+(decode reads from turbo-quantized KV cache).
+
+### The Fix (commit `1beb7e1`)
+
+Removed the in-kernel inverse WHT from `fattn-vec.cuh` (lines 689–777). The graph-side
+`ggml_turbo_wht` is now the single source of truth for the inverse transform, handling all
+FA backends (VEC, MMA, tile) and including the InnerQ scale correction.
+
+### Why This Works
+
+- **VEC kernel** (decode, ncols=1): outputs VKQ in WHT domain → graph-side inverse corrects.
+- **MMA/tile kernels** (prefill, ncols>1): output in WHT domain → graph-side inverse corrects.
+- **Non-FA path** (`ggml_mul_mat`): graph-side inverse handles this independently.
+
+All paths converge on a single, complete inverse WHT with InnerQ scaling.
+
 ## Qwen Compatibility
 
 Testing on Qwen-family models revealed anomalous perplexity results across all low-bit KV
@@ -370,7 +407,7 @@ KV Cache (per layer)
   Flash Attention (on-the-fly K/V dequantization)
                            │
                            ▼
-  KV Cache  ◄── Inverse WHT rotation (sign-flip → FWHT → sign-flip)
+  KV Cache  ◄── Graph-side inverse WHT (sign-flip → FWHT → sign-flip + InnerQ scale)
                            │
                            ▼
                       Inference

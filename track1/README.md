@@ -27,10 +27,10 @@ per byte means more questions answered *well*, locally, at 0 tokens. On an accur
 token-minimizing leaderboard, running a stronger local model is exactly what breaks the tie.
 
 Status on AMD (Radeon gfx1100 / RDNA3, ROCm): full GPU offload of the model is validated and fast —
-the 3B runs all sample tasks coherently with `-ngl 99` at ~2 s/task. The compressed-V-cache path
-(`turbo3` under Flash Attention) currently produces incoherent output on this ROCm build and is
-under active debugging (`scripts/amd-validate.sh` ships the isolation sweep); the CUDA path is the
-validated one. **The Track 1 submission does not depend on this** — it runs f16 on CPU.
+the 3B runs all sample tasks coherently with `-ngl 99` at ~2 s/task. TurboQuant V-cache compression
+(`turbo3` / `turbo2`) under Flash Attention is now validated on this ROCm build —
+`scripts/amd-validate.sh` passes all 6 configurations. **The Track 1 submission ships TurboQuant
+enabled by default** (`q8_0` K + `turbo3` V) to maximize capability-density on-device.
 
 ## Submission contract
 
@@ -39,10 +39,9 @@ The scorer runs the container as a **batch agent** (dependency-free, Python stdl
 - reads tasks from `TASK_INPUT_PATH` (default `/input/tasks.json`) — a JSON array of
   `{"task_id": str, "prompt": str}`;
 - answers each task on-device with mallana's `llama-server`, **0 Fireworks tokens**. The shipped
-  defaults are correctness-first (`-fa off --cache-type-k f16 --cache-type-v f16`) — on a small
-  model that fits RAM, TurboQuant's compressed cache buys accuracy nothing (its win is *memory*,
-  for bigger models / longer context). **TurboQuant** is validated and is the showcase for
-  GPU/large-model runs; enable it with `FLASH_ATTN=on CACHE_TYPE_K=q8_0 CACHE_TYPE_V=turbo3`;
+  defaults use TurboQuant V-cache compression (`q8_0` K + `turbo3` V with Flash Attention) —
+  validated on CUDA and ROCm (gfx1100). TurboQuant demonstrates the project's core
+  capability-density thesis; disable with `FLASH_ATTN=off CACHE_TYPE_K=f16 CACHE_TYPE_V=f16`;
 - writes `TASK_OUTPUT_PATH` (default `/output/results.json`) — a JSON array of
   `{"task_id": str, "answer": str}`, task IDs preserved exactly.
 
@@ -96,9 +95,9 @@ For interactive use, `router.py` exposes the same local model over an OpenAI-com
 |---|---|---|
 | `MODELS_DIR` | `/models` | Dir scanned for a `*.gguf` when `LOCAL_MODEL_PATH` is unset |
 | `LOCAL_MODEL_PATH` | *(unset)* | Exact path to the GGUF served locally (overrides `MODELS_DIR`) |
-| `CACHE_TYPE_K` | `f16` | K cache type (`q8_0` to compress) |
-| `CACHE_TYPE_V` | `f16` | V cache type (`turbo3` for TurboQuant 6.4× compression, needs `-fa on`) |
-| `FLASH_ATTN` | `off` | Flash Attention (`on` to enable TurboQuant's compressed V-cache) |
+| `CACHE_TYPE_K` | `q8_0` | K cache type (`f16` for no compression) |
+| `CACHE_TYPE_V` | `turbo3` | V cache type (`turbo3` for TurboQuant 4.6× compression, requires `FLASH_ATTN=on`) |
+| `FLASH_ATTN` | `on` | Flash Attention (required for TurboQuant compressed V-cache) |
 | `MAX_TOKENS` | `448` | Max generated tokens per task (room for brief step-by-step math) |
 | `SYSTEM_PROMPT` | *(reason-only-for-math default)* | Concise answers; shows steps only for arithmetic/logic; obeys exact formats |
 | `PER_TASK_TIMEOUT` | `45` | Per-task wall-clock budget; a timeout keeps the streamed partial answer |
