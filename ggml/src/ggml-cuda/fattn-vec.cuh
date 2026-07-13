@@ -318,13 +318,13 @@ static __global__ void flash_attn_ext_vec(
 
     // Build shared-memory LUT: turbo_lut[d][c] = half(Q[d] * scale * centroid[c])
     if constexpr (n_centroids_lut > 0 && ncols == 1) {
-        const float * centroids_ptr = (type_K == GGML_TYPE_TURBO3_0) ? TURBO_CENTROIDS_3BIT :
-                                      TURBO_CENTROIDS_2BIT;
         const float * Q_f = (const float *)(Q + 0*nb01);
         for (int d = tid; d < D; d += nthreads) {
             const float q_val = Q_f[d] * scale;
             for (int c = 0; c < n_centroids_lut; c++) {
-                turbo_lut[d][c] = __float2half(q_val * centroids_ptr[c]);
+                float centroid = (type_K == GGML_TYPE_TURBO3_0) ? TURBO_CENTROIDS_3BIT[c] :
+                                                                  TURBO_CENTROIDS_2BIT[c];
+                turbo_lut[d][c] = __float2half(q_val * centroid);
             }
         }
         __syncthreads();
@@ -901,6 +901,8 @@ static __global__ void flash_attn_ext_vec(
                         other[off] = section_f[partner_idx];
 #endif
                     }
+                    __syncthreads(); // Ensure all reads are done before any thread overwrites shared memory
+
                     for (int off = 0; off < 4; ++off) {
                         int idx = base + off;
                         if ((idx & s) == 0) {
@@ -917,7 +919,7 @@ static __global__ void flash_attn_ext_vec(
                         section_f[base + off] = val[off];
 #endif
                     }
-                    __syncthreads();
+                    __syncthreads(); // Ensure all writes are complete before starting the next stage
                 }
                 // S1 signs and scale by 1/sqrt(128)
                 constexpr float inv_sqrt_128 = 0.08838834764831845f;

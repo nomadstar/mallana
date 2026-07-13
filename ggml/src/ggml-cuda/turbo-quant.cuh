@@ -20,27 +20,47 @@
 
 // ---- 2-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static const __device__ float TURBO_CENTROIDS_2BIT[4] = {
-    -0.133462f, -0.039994f, 0.039994f, 0.133462f
+struct TurboCentroids2Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[4] = { -0.133462f, -0.039994f, 0.039994f, 0.133462f };
+        return vals[idx & 3];
+    }
 };
+static const __device__ TurboCentroids2Bit TURBO_CENTROIDS_2BIT;
 
-static const __device__ float TURBO_MID_2BIT[3] = {
-    -0.086728f, 0.0f, 0.086728f
+struct TurboMid2Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[3] = { -0.086728f, 0.0f, 0.086728f };
+        return vals[idx];
+    }
 };
+static const __device__ TurboMid2Bit TURBO_MID_2BIT;
 
 // ---- 3-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static const __device__ float TURBO_CENTROIDS_3BIT[8] = {
-    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-     0.021460f,  0.065717f,  0.117832f,  0.190685f
+struct TurboCentroids3Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[8] = {
+            -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+             0.021460f,  0.065717f,  0.117832f,  0.190685f
+        };
+        return vals[idx & 7];
+    }
 };
+static const __device__ TurboCentroids3Bit TURBO_CENTROIDS_3BIT;
 
 // ---- Midpoints for nearest centroid lookup ----
 
-static const __device__ float TURBO_MID_3BIT[7] = {
-    -0.154259f, -0.091775f, -0.043589f, 0.0f,
-     0.043589f,  0.091775f,  0.154259f
+struct TurboMid3Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[7] = {
+            -0.154259f, -0.091775f, -0.043589f, 0.0f,
+             0.043589f,  0.091775f,  0.154259f
+        };
+        return vals[idx];
+    }
 };
+static const __device__ TurboMid3Bit TURBO_MID_3BIT;
 
 // ---- WHT sign arrays (packed in 64-bit ALU immediate constants to avoid ROCm static initialization bugs) ----
 
@@ -292,21 +312,33 @@ static bool turbo_innerq_is_active(void) {
 
 // ---- 4-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static const __device__ float TURBO_CENTROIDS_4BIT[16] = {
-    -0.173926f, -0.117195f, -0.089527f, -0.068756f,
-    -0.051262f, -0.035597f, -0.020989f, -0.006938f,
-     0.006938f,  0.020989f,  0.035597f,  0.051262f,
-     0.068756f,  0.089527f,  0.117195f,  0.173926f
+struct TurboCentroids4Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[16] = {
+            -0.173926f, -0.117195f, -0.089527f, -0.068756f,
+            -0.051262f, -0.035597f, -0.020989f, -0.006938f,
+             0.006938f,  0.020989f,  0.035597f,  0.051262f,
+             0.068756f,  0.089527f,  0.117195f,  0.173926f
+        };
+        return vals[idx & 15];
+    }
 };
+static const __device__ TurboCentroids4Bit TURBO_CENTROIDS_4BIT;
 
 // ---- Midpoints for nearest 4-bit centroid lookup ----
 
-static const __device__ float TURBO_MID_4BIT[15] = {
-    -0.145561f, -0.103361f, -0.079142f, -0.060009f,
-    -0.043430f, -0.028293f, -0.013964f,  0.000000f,
-     0.013964f,  0.028293f,  0.043430f,  0.060009f,
-     0.079142f,  0.103361f,  0.145561f
+struct TurboMid4Bit {
+    __device__ __forceinline__ float operator[](int idx) const {
+        const float vals[15] = {
+            -0.145561f, -0.103361f, -0.079142f, -0.060009f,
+            -0.043430f, -0.028293f, -0.013964f,  0.000000f,
+             0.013964f,  0.028293f,  0.043430f,  0.060009f,
+             0.079142f,  0.103361f,  0.145561f
+        };
+        return vals[idx];
+    }
 };
+static const __device__ TurboMid4Bit TURBO_MID_4BIT;
 
 // ---- Nearest 4-bit centroid index ----
 
