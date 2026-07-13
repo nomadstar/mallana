@@ -312,6 +312,10 @@ void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * G
 
 void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TURBO3 == 0);
+    // NOTE: V is intentionally returned in the ROTATED (WHT) domain. The de-rotation is a single
+    // inverse WHT applied to the attention OUTPUT (kqv) as a separate graph op — see
+    // ggml_turbo_wht(..., /*inverse*/1, ...) in llama-graph.cpp. Do NOT apply the inverse here;
+    // that double-de-rotates and corrupts the output.
     const int nb = k / QK_TURBO3;
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
