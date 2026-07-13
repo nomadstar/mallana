@@ -18,6 +18,13 @@ The project emphasizes structured research, implementation, benchmarking, and va
 than experimental hacks. Every codec and optimization path includes a validation methodology,
 a reference implementation, and documented limitations.
 
+> **The mission —** *how much useful intelligence can we run on the hardware people already own?*
+> Instead of scaling hardware to fit larger models, Mallana works to reduce the **cost of
+> intelligence itself** — every byte of memory, every cache line, every tensor op, every watt — so
+> existing machines can run larger and better models. TurboQuant is the first step down that path;
+> quantization, attention, KV-cache systems, decoding, and execution are all in scope. Read the
+> **[Manifesto](MANIFESTO.md)** for the full vision and the principles that gate every optimization.
+
 ---
 
 ## 🧪 Evaluator's Guide — Test Everything in Minutes
@@ -514,17 +521,38 @@ on a validated foundation.
 
 ## Documentation Index
 
+<details open>
+<summary><b>🧭 Vision &amp; Process</b></summary>
+
 | Document | Description |
 |---|---|
 | [Manifesto](MANIFESTO.md) | General vision, optimization principles, and targets |
 | [Research Automation](RESEARCH.md) | Research OS framework, roles, and automated workflows |
+| [Roadmap](docs/roadmap.md) | Detailed milestones and priorities |
+| [Changelog](docs/changelog.md) | Engineering changelog |
+
+</details>
+
+<details>
+<summary><b>🏗️ Architecture &amp; Algorithms</b></summary>
+
+| Document | Description |
+|---|---|
 | [Architecture](docs/architecture.md) | High-level architecture and component relationships |
 | [TurboQuant](docs/turboquant.md) | Detailed TurboQuant algorithm and implementation |
 | [Paged Attention](docs/paged-attention.md) | Paged Attention design and implementation plan |
+
+</details>
+
+<details>
+<summary><b>📊 Evidence</b></summary>
+
+| Document | Description |
+|---|---|
 | [Validation](docs/validation.md) | Validation methodology and results |
 | [Benchmarks](docs/benchmarks.md) | Quality, performance, and memory benchmarks |
-| [Roadmap](docs/roadmap.md) | Detailed milestones and priorities |
-| [Changelog](docs/changelog.md) | Engineering changelog |
+
+</details>
 
 ---
 
