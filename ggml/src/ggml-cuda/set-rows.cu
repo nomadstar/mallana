@@ -290,25 +290,18 @@ static __global__ void k_set_rows_turbo3(
     }
     __syncthreads();
 
-    // ---- Step 2: Parallel L2 norm ----
-    constexpr int n_warps = GROUP_SIZE / WARP_SIZE;
-    __shared__ float warp_accum[n_warps];
-    float v = x[j];
-    float v2 = v * v;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        v2 += __shfl_xor_sync(0xffffffff, v2, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = v2;
+    // ---- Step 2: Parallel L2 norm via shared memory reduction ----
+    __shared__ float s_norm_arr[GROUP_SIZE];
+    s_norm_arr[j] = x[j] * x[j];
     __syncthreads();
 
-    __shared__ float s_norm_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_norm_sq = total;
+    for (int stride = GROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float grp_norm  = sqrtf(s_norm_sq);
+    const float grp_norm  = sqrtf(s_norm_arr[0]);
     const float inv_norm  = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
 
     // ---- Step 3: Normalize ----
@@ -378,23 +371,18 @@ static __global__ void k_set_rows_turbo3(
     }
     __syncthreads();  // s_idx reused as a plain buffer; ensure all reads done before step 7 reuse
 
-    // ---- Step 7: Reconstruction norm (parallel, same pattern as step 2) ----
+    // ---- Step 7: Reconstruction norm via shared memory reduction ----
     const float c = TURBO_CENTROIDS_3BIT[idx];
-    float rc = c * c;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        rc += __shfl_xor_sync(0xffffffff, rc, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = rc;
+    s_norm_arr[j] = c * c;
     __syncthreads();
 
-    __shared__ float s_recon_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_recon_sq = total;
+    for (int stride = GROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float recon_norm     = sqrtf(s_recon_sq);
+    const float recon_norm     = sqrtf(s_norm_arr[0]);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
     // ---- Step 8: Write corrected norm (one per turbo3 block) ----
@@ -459,26 +447,21 @@ static __global__ void k_set_rows_turbo3_tail(
     // ---- Load ----
     const float val = src_row[tail_start + j];
 
-    // ---- L2 norm over the tail group (warp reduce + inter-warp) ----
-    const int n_warps = tail_size / WARP_SIZE;
-    const int warp_id = j / WARP_SIZE;
-    const int lane    = j % WARP_SIZE;
-
-    __shared__ float warp_accum[4];  // max 3 warps (tail ≤ 96)
-    float v2 = val * val;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        v2 += __shfl_xor_sync(0xffffffff, v2, offset, WARP_SIZE);
-    if (lane == 0) warp_accum[warp_id] = v2;
+    // ---- L2 norm over the tail group via shared memory reduction ----
+    __shared__ float s_norm_arr[128];
+    s_norm_arr[j] = val * val;
+    s_norm_arr[j + 32] = 0.0f;
+    s_norm_arr[j + 64] = 0.0f;
+    s_norm_arr[j + 96] = 0.0f;
     __syncthreads();
 
-    __shared__ float s_norm_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_norm_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float grp_norm = sqrtf(s_norm_sq);
+    const float grp_norm = sqrtf(s_norm_arr[0]);
     const float inv_norm = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
 
     // ---- Normalize (no WHT!) ----
@@ -516,25 +499,24 @@ static __global__ void k_set_rows_turbo3_tail(
     }
     __syncthreads();  // s_idx reused as a plain buffer
 
-    // ---- Reconstruction norm ----
+    // ---- Reconstruction norm via shared memory reduction ----
     const float c = TURBO_CENTROIDS_3BIT[idx];
-    float rc = c * c;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        rc += __shfl_xor_sync(0xffffffff, rc, offset, WARP_SIZE);
-    if (lane == 0) warp_accum[warp_id] = rc;
+    s_norm_arr[j] = c * c;
+    s_norm_arr[j + 32] = 0.0f;
+    s_norm_arr[j + 64] = 0.0f;
+    s_norm_arr[j + 96] = 0.0f;
     __syncthreads();
 
-    __shared__ float s_recon_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_recon_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float recon_norm     = sqrtf(s_recon_sq);
+    const float recon_norm     = sqrtf(s_norm_arr[0]);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
-    if (lane == 0) blk->norm = __float2half(corrected_norm);
+    if (elem_in_block == 0) blk->norm = __float2half(corrected_norm);
 
     GGML_UNUSED(ne10);
     GGML_UNUSED(ne13);
@@ -716,25 +698,18 @@ static __global__ void k_set_rows_turbo2(
     }
     __syncthreads();
 
-    // ---- Step 2: Parallel L2 norm ----
-    constexpr int n_warps = GROUP_SIZE / WARP_SIZE;
-    __shared__ float warp_accum[n_warps];
-    float v = x[j];
-    float v2 = v * v;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        v2 += __shfl_xor_sync(0xffffffff, v2, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = v2;
+    // ---- Step 2: Parallel L2 norm via shared memory reduction ----
+    __shared__ float s_norm_arr[GROUP_SIZE];
+    s_norm_arr[j] = x[j] * x[j];
     __syncthreads();
 
-    __shared__ float s_norm_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_norm_sq = total;
+    for (int stride = GROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float grp_norm  = sqrtf(s_norm_sq);
+    const float grp_norm  = sqrtf(s_norm_arr[0]);
     const float inv_norm  = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
 
     // ---- Step 3: Normalize ----
@@ -794,23 +769,18 @@ static __global__ void k_set_rows_turbo2(
     }
     __syncthreads();  // s_idx reused as a plain buffer; finish reads before step 7
 
-    // ---- Step 7: Reconstruction norm ----
+    // ---- Step 7: Reconstruction norm via shared memory reduction ----
     const float c = TURBO_CENTROIDS_2BIT[idx];
-    float rc = c * c;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        rc += __shfl_xor_sync(0xffffffff, rc, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = rc;
+    s_norm_arr[j] = c * c;
     __syncthreads();
 
-    __shared__ float s_recon_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_recon_sq = total;
+    for (int stride = GROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float recon_norm     = sqrtf(s_recon_sq);
+    const float recon_norm     = sqrtf(s_norm_arr[0]);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
     // ---- Step 8: Write corrected norm (one per turbo2 block) ----
@@ -866,26 +836,21 @@ static __global__ void k_set_rows_turbo2_tail(
     // ---- Load ----
     const float val = src_row[tail_start + j];
 
-    // ---- L2 norm ----
-    const int n_warps = tail_size / WARP_SIZE;
-    const int warp_id = j / WARP_SIZE;
-    const int lane    = j % WARP_SIZE;
-
-    __shared__ float warp_accum[4];
-    float v2 = val * val;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        v2 += __shfl_xor_sync(0xffffffff, v2, offset, WARP_SIZE);
-    if (lane == 0) warp_accum[warp_id] = v2;
+    // ---- L2 norm via shared memory reduction ----
+    __shared__ float s_norm_arr[128];
+    s_norm_arr[j] = val * val;
+    s_norm_arr[j + 32] = 0.0f;
+    s_norm_arr[j + 64] = 0.0f;
+    s_norm_arr[j + 96] = 0.0f;
     __syncthreads();
 
-    __shared__ float s_norm_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_norm_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float grp_norm = sqrtf(s_norm_sq);
+    const float grp_norm = sqrtf(s_norm_arr[0]);
     const float inv_norm = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
 
     // ---- Normalize (no WHT!) ----
@@ -913,25 +878,24 @@ static __global__ void k_set_rows_turbo2_tail(
     }
     __syncthreads();
 
-    // ---- Reconstruction norm ----
+    // ---- Reconstruction norm via shared memory reduction ----
     const float c = TURBO_CENTROIDS_2BIT[idx];
-    float rc = c * c;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        rc += __shfl_xor_sync(0xffffffff, rc, offset, WARP_SIZE);
-    if (lane == 0) warp_accum[warp_id] = rc;
+    s_norm_arr[j] = c * c;
+    s_norm_arr[j + 32] = 0.0f;
+    s_norm_arr[j + 64] = 0.0f;
+    s_norm_arr[j + 96] = 0.0f;
     __syncthreads();
 
-    __shared__ float s_recon_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_recon_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float recon_norm     = sqrtf(s_recon_sq);
+    const float recon_norm     = sqrtf(s_norm_arr[0]);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
-    if (lane == 0) blk->norm = __float2half(corrected_norm);
+    if (elem_in_block == 0) blk->norm = __float2half(corrected_norm);
 
     GGML_UNUSED(ne10);
     GGML_UNUSED(ne13);
@@ -1066,25 +1030,18 @@ static __global__ void k_set_rows_turbo4(
     }
     __syncthreads();
 
-    // ---- Step 2: Parallel L2 norm ----
-    constexpr int n_warps = 128 / WARP_SIZE;  // = 4
-    __shared__ float warp_accum[n_warps];
-    float v = x[j];
-    float v2 = v * v;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        v2 += __shfl_xor_sync(0xffffffff, v2, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = v2;
+    // ---- Step 2: Parallel L2 norm via shared memory reduction ----
+    __shared__ float s_norm_arr[128];
+    s_norm_arr[j] = x[j] * x[j];
     __syncthreads();
 
-    __shared__ float s_norm_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_norm_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float grp_norm  = sqrtf(s_norm_sq);
+    const float grp_norm  = sqrtf(s_norm_arr[0]);
     const float inv_norm  = (grp_norm > 1e-10f) ? 1.0f / grp_norm : 0.0f;
 
     // ---- Step 3: Normalize ----
@@ -1129,23 +1086,18 @@ static __global__ void k_set_rows_turbo4(
     }
     __syncthreads();
 
-    // ---- Step 7: Reconstruction norm (parallel) ----
+    // ---- Step 7: Reconstruction norm via shared memory reduction ----
     const float c = TURBO_CENTROIDS_4BIT[idx];
-    float rc = c * c;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        rc += __shfl_xor_sync(0xffffffff, rc, offset, WARP_SIZE);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = rc;
+    s_norm_arr[j] = c * c;
     __syncthreads();
 
-    __shared__ float s_recon_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_recon_sq = total;
+    for (int stride = 64; stride > 0; stride >>= 1) {
+        if (j < stride) {
+            s_norm_arr[j] += s_norm_arr[j + stride];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-    const float recon_norm     = sqrtf(s_recon_sq);
+    const float recon_norm     = sqrtf(s_norm_arr[0]);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
     // ---- Step 8: Write corrected norm and zero rnorm (one thread) ----
