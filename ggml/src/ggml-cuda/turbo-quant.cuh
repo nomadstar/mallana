@@ -42,45 +42,43 @@ static const __device__ float TURBO_MID_3BIT[7] = {
      0.043589f,  0.091775f,  0.154259f
 };
 
-// ---- WHT sign arrays (seed=42) ----
+// ---- WHT sign arrays (packed in 64-bit ALU immediate constants to avoid ROCm static initialization bugs) ----
 
-static const __device__ float TURBO_WHT_SIGNS1[128] = {
-    -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-    1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
-    -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,
-    1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f,
-    -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f,
-    1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f,
-    -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f,
-    1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f
+struct TurboWhtSigns1 {
+    __device__ __forceinline__ float operator[](int idx) const {
+        if (idx < 64) {
+            return (0xbd07a6b61b95fca6ULL & (1ULL << idx)) ? 1.0f : -1.0f;
+        } else {
+            return (0xb60daf565b39c444ULL & (1ULL << (idx - 64))) ? 1.0f : -1.0f;
+        }
+    }
 };
+static const __device__ TurboWhtSigns1 TURBO_WHT_SIGNS1;
 
-static const __device__ float TURBO_WHT_SIGNS2[128] = {
-    1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
-    1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
-    1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f,
-    1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f,
-    1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f,
-    -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f,
-    1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f,
-    -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f
+struct TurboWhtSigns2 {
+    __device__ __forceinline__ float operator[](int idx) const {
+        if (idx < 64) {
+            return (0xc09d7023e953116fULL & (1ULL << idx)) ? 1.0f : -1.0f;
+        } else {
+            return (0x415a9a9d485aca85ULL & (1ULL << (idx - 64))) ? 1.0f : -1.0f;
+        }
+    }
 };
+static const __device__ TurboWhtSigns2 TURBO_WHT_SIGNS2;
 
-// ---- 64-element WHT sign arrays (first 64 of the 128-element arrays) ----
-
-static const __device__ float TURBO_WHT_SIGNS1_64[64] = {
-    -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-    1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
-    -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,
-    1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f
+struct TurboWhtSigns1_64 {
+    __device__ __forceinline__ float operator[](int idx) const {
+        return (0xbd07a6b61b95fca6ULL & (1ULL << (idx & 63))) ? 1.0f : -1.0f;
+    }
 };
+static const __device__ TurboWhtSigns1_64 TURBO_WHT_SIGNS1_64;
 
-static const __device__ float TURBO_WHT_SIGNS2_64[64] = {
-    1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f,
-    1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
-    1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f,
-    1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f
+struct TurboWhtSigns2_64 {
+    __device__ __forceinline__ float operator[](int idx) const {
+        return (0xc09d7023e953116fULL & (1ULL << (idx & 63))) ? 1.0f : -1.0f;
+    }
 };
+static const __device__ TurboWhtSigns2_64 TURBO_WHT_SIGNS2_64;
 
 // ---- Fast Walsh-Hadamard Transform (in-place, normalized) ----
 // O(n log n) = 896 ops for n=128
