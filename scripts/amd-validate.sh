@@ -37,7 +37,10 @@ Instala ROCm: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tuto
 echo "ROCm path : $(hipconfig -R 2>/dev/null)"
 echo "hip clang : $(hipconfig -l 2>/dev/null)/clang"
 if command -v rocminfo >/dev/null 2>&1; then
-  rocminfo 2>/dev/null | grep -m1 'Marketing Name' | sed 's/^ *//' || true
+  # El PRIMER "Marketing Name" suele ser el CPU; reporta el nombre del agente GPU (bloque con Name: gfx)
+  rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{f=1} f&&/Marketing Name/{sub(/^ *Marketing Name: */,"GPU: ");print;exit}' || true
+  rocminfo 2>/dev/null | grep -qE '^ *Name: *gfx' \
+    || echo "(AVISO: rocminfo NO lista un agente GPU 'gfx' — ¿la Radeon está asignada a este contenedor? Sin GPU, -ngl 99 corre en CPU.)"
 fi
 [ -e /dev/kfd ] || echo "(aviso: /dev/kfd no existe — el contenedor/host quizá no expone la GPU)"
 
@@ -112,8 +115,40 @@ echo "BIN=$BIN"
 # ---------------------------------------------------------------------------
 echo "############ 2. Modelo 3B ############"
 mkdir -p "$MODEL_DIR"
-[ -f "$MODEL" ] || { echo ">> bajando 3B..."; curl -L --fail -o "$MODEL" "$MODEL_URL" || die "descarga del modelo falló"; }
-ls -lh "$MODEL"
+HF_REPO="Qwen/Qwen2.5-3B-Instruct-GGUF"
+HF_FILE="qwen2.5-3b-instruct-q4_k_m.gguf"
+
+fetch_model() {
+  # 1) ya está, o el usuario dejó CUALQUIER *.gguf en MODEL_DIR (descarga manual / scp)
+  [ -s "$MODEL" ] && { echo ">> modelo ya presente"; return 0; }
+  local existing
+  existing=$(ls "$MODEL_DIR"/*.gguf 2>/dev/null | head -1 || true)
+  [ -n "$existing" ] && { MODEL="$existing"; echo ">> uso gguf existente: $MODEL"; return 0; }
+  # 2) CLI nativo de HF (respeta HF_TOKEN/HF_ENDPOINT y reintenta/resume — suele pasar donde curl no)
+  for cli in "hf download" "huggingface-cli download"; do
+    if command -v ${cli%% *} >/dev/null 2>&1; then
+      echo ">> intentando '$cli'..."
+      if $cli "$HF_REPO" "$HF_FILE" --local-dir "$MODEL_DIR" 2>&1 | tail -3; then
+        [ -s "$MODEL_DIR/$HF_FILE" ] && { MODEL="$MODEL_DIR/$HF_FILE"; return 0; }
+      fi
+    fi
+  done
+  # 3) curl con reintentos, luego mirror hf-mirror.com
+  echo ">> intentando curl (reintentos)..."
+  curl -L --fail --retry 5 --retry-delay 3 --connect-timeout 20 -o "$MODEL" "$MODEL_URL" && return 0
+  echo ">> intentando mirror hf-mirror.com..."
+  curl -L --fail --retry 3 --retry-delay 3 --connect-timeout 20 -o "$MODEL" "${MODEL_URL/huggingface.co/hf-mirror.com}" && return 0
+  return 1
+}
+
+if fetch_model; then
+  ls -lh "$MODEL"
+else
+  die "No pude obtener el modelo (la instancia parece sin salida a huggingface.co).
+   Opciones: (a) exporta HF_TOKEN y reintenta; (b) descarga $HF_FILE por otra vía y déjalo en
+   $MODEL_DIR (el script toma cualquier *.gguf de ahí); (c) usa MODEL_DIR=/ruta/con/gguf.
+   URL directa: $MODEL_URL"
+fi
 
 # ---------------------------------------------------------------------------
 echo "############ 3. Tasks (10 sample) ############"
@@ -187,7 +222,7 @@ run_sweep "A f16 baseline"  f16  f16    on
 run_sweep "B TurboQuant"    q8_0 turbo3 on
 
 echo "############ RESUMEN — pégame esto ############"
-echo "GPU     : $(rocminfo 2>/dev/null | grep -m1 'Marketing Name' | sed 's/.*: *//' || echo '?')"
+echo "GPU     : $(rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{f=1} f&&/Marketing Name/{sub(/^ *Marketing Name: */,"");print;exit}' || echo '?')"
 echo "GFX     : $GFX"
 echo "Binario : $BIN  ($(ldd "$BIN" 2>/dev/null | grep -oiE 'libamdhip[^ ]*' | head -1))"
 echo "Modelo  : $(basename "$MODEL")"
