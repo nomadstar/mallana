@@ -454,6 +454,7 @@ KV Cache (per layer)
 | ROCm/HIP PagedAttention validation | P2 |
 | TriAttention calibration and numerical validation | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
+| Commodity-hardware efficiency (FFAI-inspired): kernel warmup, dispatch overhead, AURA-vs-TurboQuant KV | P4 |
 | Upstream synchronization | P3 |
 | Vulkan TurboQuant kernels | P3 |
 
@@ -516,6 +517,7 @@ on a validated foundation.
 - [ ] Layer-wise inference / weight streaming (AirLLM-style) — 70B on 4 GB VRAM without quantization
 - [ ] Prefetch-compute overlap for layer streaming
 - [ ] codebase-memory-mcp integration for Research OS agent navigation
+- [ ] **Commodity-hardware efficiency** ([FFAI](https://github.com/thewafflehaus/FFAI)-inspired) — the *efficient-on-hardware-you-own* half of the mission, not just *lighter*: precompiled-kernel warmup (cut Metal cold-start / time-to-first-token), a CPU↔GPU dispatch-overhead audit (ties into the single-GPU sync debt), and an AURA-vs-TurboQuant KV-compression benchmark. Ideas only — mallana stays a portable multi-backend fork; measurement first. See [docs/roadmap.md](docs/roadmap.md#commodity-hardware-efficiency-ffai-inspired).
 
 ---
 

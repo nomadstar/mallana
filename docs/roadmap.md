@@ -41,6 +41,7 @@
 | ROCm/HIP remaining work: PagedAttention (`LLAMA_PAGING=1`) on AMD, ROCWMMA Flash Attention for turbo types (`-DGGML_HIP_ROCWMMA_FATTN=ON`), and a self-hosted AMD runner for CI | P2 |
 | TriAttention H6.1 validation (generation-mode eval) | P4 |
 | Large-scale benchmarks (multi-GPU, multi-model) | P2 |
+| Commodity-hardware efficiency track (FFAI-inspired): precompiled-kernel warmup, dispatch-overhead reduction, AURA-vs-TurboQuant KV benchmark — see [below](#commodity-hardware-efficiency-ffai-inspired) | P4 |
 | Upstream synchronization | P3 |
 
 The project has transitioned from debugging the implementation to building new capabilities
@@ -56,6 +57,36 @@ on a validated foundation.
 | **P2 — Performance** | Throughput, latency, and memory efficiency |
 | **P3 — Portability** | Backend support (ROCm, Vulkan, SYCL, WebGPU) |
 | **P4 — Research** | Exploratory features, future extensions |
+
+---
+
+## Commodity-Hardware Efficiency (FFAI-inspired)
+
+The [Manifesto](../MANIFESTO.md) frames the mission as *"how much useful intelligence can we run
+on the hardware people already own?"* — which is not only **lighter** models (fewer bits) but also
+**efficient execution** on the machines real users have: laptops, integrated GPUs, older discrete
+cards, and Apple Silicon. [FFAI](https://github.com/thewafflehaus/FFAI) ("Fucking Fast Apple
+Inference"), an Apple-Silicon-only Metal inference library that **TheTom** contributed to, is a
+useful reference point for that second half.
+
+FFAI is a from-scratch, Metal-only library, so we do **not** adopt its code — mallana stays a
+portable, multi-backend fork on top of `ggml`/`llama.cpp`. What transfers are *backend-agnostic
+ideas*, each of which we would evaluate under the usual gates (passes CI, improves a real metric,
+does not break another backend):
+
+| Idea (FFAI) | What it buys on commodity hardware | Where it lands in mallana |
+|---|---|---|
+| **Precompiled kernels** (metaltile DSL — no JIT at load) | Faster cold start / time-to-first-token; predictable warmup on constrained machines | Metal-backend warmup path; measure and, where possible, cache/precompile kernel pipelines |
+| **Single-buffer-per-token dispatch** (~4 bytes/token CPU↔GPU) | Lower per-token CPU–GPU sync overhead → steadier interactive latency | Directly related to the already-logged *"unconditional synchronization performance debt"* in [Known Failures](#known-failures--pending-technical-debt); a dispatch-overhead audit belongs there |
+| **AURA quantized KV cache** (alongside affine 4/8-bit) | An alternative KV-compression scheme to compare against TurboQuant | Benchmark AURA vs `turbo2/3/4` on the existing PPL + memory gate — evidence, not adoption, first |
+| **Capability-driven hot loading** of vision/audio encoders | Smaller resident memory footprint for multimodal | Lazy/on-demand encoder loading in the multimodal path (`mtmd`) to cut idle memory |
+| **Dependency-free HF→quantized CLI** (no Python) | Lower-friction on-device quantization for end users | Ergonomics reference for the fork's own quantization/serve tooling |
+
+**Scope note:** these are **P4 / research** entries — exploratory directions, not committed work.
+The first concrete, low-risk step is *measurement*: a Metal-backend warmup/TTFT profile and a
+dispatch-overhead audit (which also informs the existing single-GPU sync-debt item). AURA is an
+evidence-gathering benchmark before any decision to implement. Nothing here changes the default
+behavior of any existing backend.
 
 ---
 
