@@ -324,6 +324,9 @@ struct cmd_params {
     std::vector<int>                 n_ubatch;
     std::vector<ggml_type>           type_k;
     std::vector<ggml_type>           type_v;
+    std::vector<std::string>         triattention_stats;
+    std::vector<int>                 triattention_budget;
+    std::vector<int>                 triattention_page_budget;
     std::vector<int>                 n_threads;
     std::vector<std::string>         cpu_mask;
     std::vector<bool>                cpu_strict;
@@ -366,6 +369,9 @@ static const cmd_params cmd_params_defaults = {
     /* n_ubatch             */ { 512 },
     /* type_k               */ { GGML_TYPE_F16 },
     /* type_v               */ { GGML_TYPE_F16 },
+    /* triattention_stats   */ { "" },
+    /* triattention_budget  */ { 0 },
+    /* triattention_page_bud*/ { 0 },
     /* n_threads            */ { cpu_get_num_math() },
     /* cpu_mask             */ { "0x0" },
     /* cpu_strict           */ { false },
@@ -640,6 +646,27 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     break;
                 }
                 params.type_v.insert(params.type_v.end(), types.begin(), types.end());
+            } else if (arg == "--triattention-stats") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<std::string>(argv[i], split_delim);
+                params.triattention_stats.insert(params.triattention_stats.end(), p.begin(), p.end());
+            } else if (arg == "--triattention-budget") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = parse_int_range(argv[i]);
+                params.triattention_budget.insert(params.triattention_budget.end(), p.begin(), p.end());
+            } else if (arg == "--triattention-page-budget") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = parse_int_range(argv[i]);
+                params.triattention_page_budget.insert(params.triattention_page_budget.end(), p.begin(), p.end());
             } else if (arg == "-dev" || arg == "--device") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1100,6 +1127,9 @@ struct cmd_params_instance {
     int                n_ubatch;
     ggml_type          type_k;
     ggml_type          type_v;
+    std::string        triattention_stats;
+    int                triattention_budget;
+    int                triattention_page_budget;
     int                n_threads;
     std::string        cpu_mask;
     bool               cpu_strict;
@@ -1195,6 +1225,9 @@ struct cmd_params_instance {
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;
+        cparams.triattention_page_budget = triattention_page_budget;
+
+        common_apply_triattention_stats(cparams, triattention_stats, triattention_budget);
 
         return cparams;
     }
@@ -1222,6 +1255,9 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & nub : params.n_ubatch)
     for (const auto & tk : params.type_k)
     for (const auto & tv : params.type_v)
+    for (const auto & ts_stats : params.triattention_stats)
+    for (const auto & ts_budget : params.triattention_budget)
+    for (const auto & ts_page_budget : params.triattention_page_budget)
     for (const auto & nkvo : params.no_kv_offload)
     for (const auto & fa : params.flash_attn)
     for (const auto & nt : params.n_threads)
@@ -1242,6 +1278,9 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_ubatch     = */ nub,
                 /* .type_k       = */ tk,
                 /* .type_v       = */ tv,
+                /* .triattention_stats = */ ts_stats,
+                /* .triattention_budget= */ ts_budget,
+                /* .triattention_page_budget = */ ts_page_budget,
                 /* .n_threads    = */ nt,
                 /* .cpu_mask     = */ cm,
                 /* .cpu_strict   = */ cs,
@@ -1277,6 +1316,9 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_ubatch     = */ nub,
                 /* .type_k       = */ tk,
                 /* .type_v       = */ tv,
+                /* .triattention_stats = */ ts_stats,
+                /* .triattention_budget= */ ts_budget,
+                /* .triattention_page_budget = */ ts_page_budget,
                 /* .n_threads    = */ nt,
                 /* .cpu_mask     = */ cm,
                 /* .cpu_strict   = */ cs,
@@ -1312,6 +1354,9 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_ubatch     = */ nub,
                 /* .type_k       = */ tk,
                 /* .type_v       = */ tv,
+                /* .triattention_stats = */ ts_stats,
+                /* .triattention_budget= */ ts_budget,
+                /* .triattention_page_budget = */ ts_page_budget,
                 /* .n_threads    = */ nt,
                 /* .cpu_mask     = */ cm,
                 /* .cpu_strict   = */ cs,

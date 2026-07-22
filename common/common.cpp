@@ -1350,6 +1350,64 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     return mparams;
 }
 
+void common_apply_triattention_stats(struct llama_context_params & cparams, const std::string & triattention_stats, int triattention_budget) {
+    if (triattention_stats.empty()) return;
+    std::ifstream f(triattention_stats);
+    if (!f.is_open()) {
+        LOG_WRN("%s: cannot open triattention file '%s', ignoring\n", __func__, triattention_stats.c_str());
+    } else {
+        try {
+            json j = json::parse(f);
+
+            // Validate format
+            if (!j.contains("format") || j["format"] != "triattention-v1") {
+                LOG_WRN("%s: triattention file has unknown format, ignoring\n", __func__);
+            } else {
+                // Determine effective budget
+                int budget       = triattention_budget;
+                int max_seq_len  = j.value("calibration", json{}).value("max_seq_len", 2048);
+
+                // Compute fraction: budget=0 → use file defaults (50% compression)
+                float fraction_q8 = (budget > 0)
+                    ? std::min(1.0f, (float)budget / (float)max_seq_len)
+                    : 0.5f;
+
+                // Count layers recommending turbo3 for V
+                int n_layers  = j.value("n_layers", 0);
+                int n_turbo_v = 0;
+                if (j.contains("layers") && j["layers"].is_array()) {
+                    for (auto & layer : j["layers"]) {
+                        if (layer.value("cache_type_v", "") != "q8_0") {
+                            n_turbo_v++;
+                        }
+                    }
+                }
+
+                // If calibration recommends compression AND user's budget allows it,
+                // apply the global recommended types.
+                // Simple heuristic: use turbo3 for V if >30% of layers are recommended so
+                bool use_turbo_v = (n_layers > 0) && ((float)n_turbo_v / n_layers > 0.3f);
+                bool budget_allows = (fraction_q8 < 0.95f);
+
+                if (use_turbo_v && budget_allows) {
+                    // Only override V type if user hasn't explicitly set it to something else
+                    if (cparams.type_v == GGML_TYPE_F16 || cparams.type_v == GGML_TYPE_Q8_0) {
+                        cparams.type_v = GGML_TYPE_TURBO3_0;
+                        LOG_INF("%s: triattention: V cache → turbo3 (budget=%d, %.0f%% layers compressed)\n",
+                                __func__, budget, (float)n_turbo_v / n_layers * 100);
+                    }
+                } else {
+                    LOG_INF("%s: triattention: calibration loaded but no compression applied "
+                            "(budget=%d, turbo_v_layers=%d/%d)\n",
+                            __func__, budget, n_turbo_v, n_layers);
+                }
+            }
+        } catch (const json::exception & e) {
+            LOG_WRN("%s: failed to parse triattention file: %s\n", __func__, e.what());
+        }
+    }
+}
+
 struct llama_context_params common_context_params_to_llama(const common_params & params) {
     auto cparams = llama_context_default_params();
 
@@ -1386,60 +1444,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     // TriAttention: override KV types from calibration file if provided
     if (!params.triattention_stats.empty()) {
-        std::ifstream f(params.triattention_stats);
-        if (!f.is_open()) {
-            LOG_WRN("%s: cannot open triattention file '%s', ignoring\n", __func__, params.triattention_stats.c_str());
-        } else {
-            try {
-                json j = json::parse(f);
-
-                // Validate format
-                if (!j.contains("format") || j["format"] != "triattention-v1") {
-                    LOG_WRN("%s: triattention file has unknown format, ignoring\n", __func__);
-                } else {
-                    // Determine effective budget
-                    int budget       = params.triattention_budget;
-                    int max_seq_len  = j.value("calibration", json{}).value("max_seq_len", 2048);
-
-                    // Compute fraction: budget=0 → use file defaults (50% compression)
-                    float fraction_q8 = (budget > 0)
-                        ? std::min(1.0f, (float)budget / (float)max_seq_len)
-                        : 0.5f;
-
-                    // Count layers recommending turbo3 for V
-                    int n_layers  = j.value("n_layers", 0);
-                    int n_turbo_v = 0;
-                    if (j.contains("layers") && j["layers"].is_array()) {
-                        for (auto & layer : j["layers"]) {
-                            if (layer.value("cache_type_v", "") != "q8_0") {
-                                n_turbo_v++;
-                            }
-                        }
-                    }
-
-                    // If calibration recommends compression AND user's budget allows it,
-                    // apply the global recommended types.
-                    // Simple heuristic: use turbo3 for V if >30% of layers are recommended so
-                    bool use_turbo_v = (n_layers > 0) && ((float)n_turbo_v / n_layers > 0.3f);
-                    bool budget_allows = (fraction_q8 < 0.95f);
-
-                    if (use_turbo_v && budget_allows) {
-                        // Only override V type if user hasn't explicitly set it to something else
-                        if (cparams.type_v == GGML_TYPE_F16 || cparams.type_v == GGML_TYPE_Q8_0) {
-                            cparams.type_v = GGML_TYPE_TURBO3_0;
-                            LOG_INF("%s: triattention: V cache → turbo3 (budget=%d, %.0f%% layers compressed)\n",
-                                    __func__, budget, (float)n_turbo_v / n_layers * 100);
-                        }
-                    } else {
-                        LOG_INF("%s: triattention: calibration loaded but no compression applied "
-                                "(budget=%d, turbo_v_layers=%d/%d)\n",
-                                __func__, budget, n_turbo_v, n_layers);
-                    }
-                }
-            } catch (const json::exception & e) {
-                LOG_WRN("%s: failed to parse triattention file: %s\n", __func__, e.what());
-            }
-        }
+        common_apply_triattention_stats(cparams, params.triattention_stats, params.triattention_budget);
     }
 
     return cparams;
