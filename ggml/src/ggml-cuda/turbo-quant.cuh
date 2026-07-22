@@ -179,6 +179,8 @@ static void turbo_innerq_init(void) {
     if (innerq_initialized) return;
     innerq_initialized = true;
 
+    auto start = std::chrono::steady_clock::now();
+
     const char * env = getenv("TURBO_INNERQ");
     if (!env || atoi(env) <= 0) {
         innerq_enabled = 0;
@@ -199,8 +201,11 @@ static void turbo_innerq_init(void) {
     CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_active, &zero, sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_innerq_calibrating, &one, sizeof(int)));
 
-    GGML_LOG_INFO("%s: InnerQ calibration started (target=%d tokens, strength=%.2f)\n",
-                   __func__, innerq_target_tokens, innerq_strength);
+    auto end = std::chrono::steady_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    GGML_LOG_INFO("%s: InnerQ calibration started (target=%d tokens, strength=%.2f, setup_time=%.3fms)\n",
+                   __func__, innerq_target_tokens, innerq_strength, elapsed_ms);
 }
 
 // Host: finalize calibration — compute scales, upload, activate
@@ -270,6 +275,13 @@ static void turbo_innerq_finalize(int group_size) {
                    __func__, count, max_ratio, min_ratio);
 }
 
+#include <chrono>
+
+// Host: check if InnerQ is currently active (finalized)
+static bool turbo_innerq_is_active(void) {
+    return innerq_enabled == 2;
+}
+
 // Host: called before each set_rows kernel launch
 static void turbo_innerq_check_finalize(int group_size, int64_t ne00) {
     if (!innerq_initialized) {
@@ -277,13 +289,7 @@ static void turbo_innerq_check_finalize(int group_size, int64_t ne00) {
     }
     if (innerq_enabled == 0) return;
 
-    // InnerQ only works when each WHT group = one head (group_size == head_dim).
-    // For standard models: ne00 = n_heads * head_dim, group_size = head_dim → ne00 % group_size == 0, fine.
-    // For non-standard models (head_dim > group_size, e.g. GLM 576 → 64-group):
-    //   ne00 = head_dim (single head), group_size = 64, ne00/group_size = 9 groups per head → WRONG.
-    // Detect: if ne00 / group_size doesn't divide evenly into standard head counts (1,2,4,8,16,32,64,128),
-    // it's likely multi-group-per-head. Simpler check: group_size < 128 means head_dim > 128.
-    const bool multi_group_per_head = (group_size < 128);  // 64-group → head_dim > 128, multi-group
+    const bool multi_group_per_head = (group_size < 128); 
     if (multi_group_per_head) {
         if (innerq_enabled == 1) {
             GGML_LOG_WARN("%s: InnerQ disabled (ne00=%lld != group_size=%d, multi-group heads)\n",
@@ -295,19 +301,22 @@ static void turbo_innerq_check_finalize(int group_size, int64_t ne00) {
         return;
     }
 
-    // Check if calibration is complete
+    // Check if calibration is complete, polling less frequently to avoid sync overhead
     if (innerq_enabled == 1) {
-        int count = 0;
-        CUDA_CHECK(cudaMemcpyFromSymbol(&count, d_innerq_count, sizeof(int)));
-        if (count >= innerq_target_tokens) {
-            turbo_innerq_finalize(group_size);
+        static int check_counter = 0;
+        check_counter++;
+        if (check_counter % 64 == 0) { // Check once every ~64 layers (~1 or 2 tokens)
+            int count = 0;
+            CUDA_CHECK(cudaMemcpyFromSymbol(&count, d_innerq_count, sizeof(int)));
+            if (count >= innerq_target_tokens) {
+                auto start = std::chrono::steady_clock::now();
+                turbo_innerq_finalize(group_size);
+                auto end = std::chrono::steady_clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+                fprintf(stderr, "CALIB finalize time=%.3fms, tensor elements=%d\n", elapsed_ms, count);
+            }
         }
     }
-}
-
-// Host: check if InnerQ is currently active (finalized)
-static bool turbo_innerq_is_active(void) {
-    return innerq_enabled == 2;
 }
 
 // ---- 4-bit centroids (Lloyd-Max for N(0, 1/128)) ----
