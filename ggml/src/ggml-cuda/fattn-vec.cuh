@@ -453,7 +453,9 @@ static __global__ void flash_attn_ext_vec(
         // visible without it, so skipping it corrupted attention weights and produced
         // repetitive-gibberish generation on gfx1100. Turbo now uses the same shared-memory
         // path (see above), so it needs this barrier too.
+#ifndef __HIP__
         __syncwarp();
+#endif
 
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {

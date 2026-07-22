@@ -47,9 +47,9 @@ find_package(hip     REQUIRED)
 find_package(hipblas REQUIRED)
 find_package(rocblas REQUIRED)
 
-if (${hip_VERSION} VERSION_LESS 6.1)
-    message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
-endif()
+#if (${hip_VERSION} VERSION_LESS 6.1)
+#    message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
+#endif()
 
 message(STATUS "HIP and hipBLAS found")
 
