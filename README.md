@@ -4,7 +4,7 @@
 
 # Mallana — Building tomorrow’s llama.cpp.
 
-> Advanced KV cache compression for llama.cpp with validated CPU and GPU implementations.
+> Advanced KV cache compression for llama.cpp with CPU and GPU implementations and documented validation.
 > Walsh-Hadamard rotated polar codebook quantization for long-context LLM inference.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -15,8 +15,8 @@ Attention integration, and Paged Attention — into the llama.cpp codebase while
 correctness, reproducibility, and compatibility.
 
 The project emphasizes structured research, implementation, benchmarking, and validation rather
-than experimental hacks. Every codec and optimization path includes a validation methodology,
-a reference implementation, and documented limitations.
+than experimental hacks. Implemented optimization paths are expected to carry a validation
+methodology, a reference or comparison point where applicable, and documented limitations.
 
 > **The mission —** *how much useful intelligence can we run on the hardware people already own?*
 > Instead of scaling hardware to fit larger models, Mallana works to reduce the **cost of
@@ -25,12 +25,33 @@ a reference implementation, and documented limitations.
 > quantization, attention, KV-cache systems, decoding, and execution are all in scope. Read the
 > **[Manifesto](MANIFESTO.md)** for the full vision and the principles that gate every optimization.
 
+### Claims, evidence, and scope
+
+The manifesto describes Mallana's **research direction and intended destination**. It is not a
+statement that every part of that destination has already been achieved.
+
+The README uses a narrower standard for technical claims:
+
+- **Implemented** means the code path exists and can be exercised.
+- **Validated** means the repository contains documented tests or experiments supporting the
+  stated behavior under the configurations that were actually tested.
+- **Experimental / pending validation** means implementation exists, but the evidence is not yet
+  sufficient to make a stronger claim about quality, performance, or generality.
+- **Roadmap / future research** describes intended work, not current capability.
+
+Benchmark numbers in this document are measurements from the hardware, models, parameters, and
+run counts stated beside them. They are evidence for those tested conditions, not universal
+performance guarantees. The implementation, test infrastructure, regression history, negative
+results, and documented limitations are intentionally preserved so that other people and systems
+working on Mallana have a reproducible technical record to inspect.
+
 ---
 
-## 🧪 Evaluator's Guide — Test Everything in Minutes
+## 🧪 Evaluator's Guide — Evaluate Current Claims in Minutes
 
-Everything below is designed so you can verify the claims yourself, from a 60-second smoke
-test to the full numerical validation suite.
+Everything below is designed so you can reproduce the documented behavior yourself, from a
+short smoke test to the numerical validation suite. A passing test establishes evidence for the
+configuration it exercises; broader conclusions require broader testing.
 
 ### Option A — Docker (fastest, CPU-only)
 
@@ -66,8 +87,9 @@ cmake -B build -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=ON && cmake --build build -j
 
 ### Option C — AMD GPU (ROCm / HIP) 🔴
 
-Validated on real AMD hardware — **gfx1100 (RDNA3), ROCm 7.2.4** — with `test-llama-archs`
-matching the CPU reference at NMSE 1e-8–1e-12 across every architecture.
+Validated on the documented real-hardware configuration — **gfx1100 (RDNA3), ROCm 7.2.4** — with
+`test-llama-archs` matching the CPU reference at NMSE 1e-8–1e-12 across the architectures covered
+by that validation run. Other AMD architectures should be treated as separate validation targets.
 
 **Native build** (fastest path on an AMD box):
 
@@ -77,9 +99,9 @@ cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100 \
       -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON \
   && cmake --build build -j$(nproc)
 
-# Prove it end-to-end on the GPU:
+# Exercise it end-to-end on the GPU:
 ./build/bin/test-turbo-quant
-./build/bin/test-llama-archs          # every arch OK on "AMD Radeon Graphics"
+./build/bin/test-llama-archs
 ```
 
 Set `AMDGPU_TARGETS` to your GPU's arch (`gfx1100` RX 7900 / W7900, `gfx942` MI300,
@@ -99,9 +121,10 @@ Tested on **gfx1100 (RDNA3), ROCm 7.2.4** using Gemma 3 4B:
 | K=F16, V=F16 (FA=off) | ~5100 | ~70 | ✅ OK | Non-FA path validated |
 
 > [!NOTE]
-> **All KV cache configurations now work with Flash Attention on RDNA3.** The double inverse WHT
-> bug (fixed 2026-07-13) previously caused turbo V types to produce garbage output during decode.
-> Use any combination of `ctk`/`ctv` with `-fa on`.
+> In the tested RDNA3 configuration, the listed KV cache configurations work with Flash Attention.
+> The double inverse WHT bug (fixed 2026-07-13) previously caused turbo V types to produce garbage
+> output during decode. Use any combination of `ctk`/`ctv` with `-fa on`, and validate new hardware
+> or model combinations independently.
 
 **Docker with GPU passthrough:**
 
@@ -125,11 +148,11 @@ too if the container can't see the GPU.
 |---|---|---|
 | **TurboQuant KV compression** | `llama-cli -m model.gguf --cache-type-k q8_0 --cache-type-v turbo3 -fa on` | Coherent output; KV buffer size in the load log shrinks ~4.6× for V |
 | **Aggressive long-context compression** | `--cache-type-v turbo2 -c 32768` | KV memory 6.4× smaller vs f16 at the same context length |
-| **PagedAttention (native paged FA)** | `LLAMA_PAGING=1 llama-cli -m model.gguf -ngl 99 -fa on ...` (CUDA build, KV fully on GPU) | Identical output vs `LLAMA_PAGING=0`; log line confirming paging is active |
+| **PagedAttention (native paged FA)** | `LLAMA_PAGING=1 llama-cli -m model.gguf -ngl 99 -fa on ...` (CUDA build, KV fully on GPU) | Compare output vs `LLAMA_PAGING=0`; log line confirming paging is active |
 | **TriAttention KV eviction** | See [docs/paged-attention.md](docs/paged-attention.md) — experimental, off by default (`triattention_page_budget = 0`) | Research feature; calibration status in `research/milestone-007/` |
 | **Correctness suite** | `bash scripts/validate.sh` | Incremental build + full ctest (`-L main`), all green |
-| **Per-architecture regression (the hard one)** | `LLAMA_PAGING=1 ./build/bin/test-llama-archs` | **0 failures across 109 checks** — every supported architecture matches the CPU reference under paged attention (CUDA) |
-| **Perplexity quality gate** | `MODEL=/path/model.gguf WIKI=/path/wiki.test.raw bash scripts/turbo-quality-gate.sh` | TurboQuant PPL within 5% of the fp16 baseline |
+| **Per-architecture regression** | `LLAMA_PAGING=1 ./build/bin/test-llama-archs` | Reproduce the documented CUDA regression result; investigate any divergence from the CPU reference |
+| **Perplexity quality gate** | `MODEL=/path/model.gguf WIKI=/path/wiki.test.raw bash scripts/turbo-quality-gate.sh` | Check TurboQuant PPL against the gate's configured reference and threshold |
 | **Throughput benchmark** | `python3 scripts/benchmark.py` | Prompt/generation t/s per model (table below measured on an RTX 2050) |
 | **Multi-agent Research OS** | `python3 scripts/multiswarm.py --audit` | opencode audits the current diff and writes `.multiswarm_audit.md` |
 
@@ -139,36 +162,43 @@ too if the container can't see the GPU.
   fully resident on CUDA devices — the loader verifies this and falls back with a warning
   otherwise. This gate exists because paging is validated on CUDA only (see
   [docs/paged-attention.md](docs/paged-attention.md) for the design and status).
-- **TurboQuant types are opt-in** via `--cache-type-k` / `--cache-type-v`; everything else in
-  llama.cpp behaves exactly like upstream.
-- **Known limitation to not trip over**: Qwen-family models degrade with *any* low-bit K-cache
-  quantization (including upstream `q4_0`) — use `q8_0`/`f16` for K there (details
-  [below](#qwen-compatibility)).
+- **TurboQuant types are opt-in** via `--cache-type-k` / `--cache-type-v`; standard upstream
+  quantization paths are intended to remain unchanged. Regressions in those paths should be
+  treated as bugs rather than assumed compatibility.
+- **Known limitation to not trip over**: Qwen-family models in the documented tests degrade with
+  low-bit K-cache quantization (including upstream `q4_0`) — use `q8_0`/`f16` for K there and
+  validate additional models independently (details [below](#qwen-compatibility)).
 
 ---
 
 ## Project Overview
 
 TurboQuant applies Walsh-Hadamard Transform (WHT) rotation followed by polar codebook
-quantization to the KV cache. This family of techniques, introduced in Google's TurboQuant
-paper (ICLR 2026), enables 3–6× compression of the key-value cache with minimal perplexity
-degradation compared to traditional MSE-optimal quantization.
+quantization to the KV cache. The TurboQuant paper (ICLR 2026) reports 3–6× KV-cache compression
+with limited perplexity degradation under its evaluated conditions; Mallana implements and tests
+this family of techniques inside llama.cpp.
 
-This fork extends the original work significantly:
+This fork currently includes:
 
-- **Asymmetric K/V policy** — V tolerates aggressive compression (3–6×) while K does not.
-  The recommended default (`q8_0` K + `turbo3` V) reflects this finding.
+- **Asymmetric K/V policy** — current Mallana experiments show that V tolerates more aggressive
+  compression than K on the tested models. The recommended default (`q8_0` K + `turbo3` V)
+  reflects that evidence.
 - **Two new types** — `turbo2` (2-bit, 6.4× compression) and `turbo4` (4-bit, 3.8× compression),
   added on top of the original `turbo3` (3-bit, 4.6× compression).
-- **Cross-backend validation** — Every type is validated on CPU and GPU (CUDA), with
-  an automated quality gate ensuring PPL stays within 5% of the fp16 baseline.
+- **Cross-backend implementation and validation** — Turbo types have CPU and CUDA validation,
+  with additional backend-specific validation documented below. The automated quality gate is a
+  regression tool for its configured model, reference value, corpus, threshold, and environment;
+  it should not be read as a universal quality guarantee.
 - **Paged Attention Phase 1** — Functional gather-before-FlashAttention with dynamic page
   allocation.
-- **TriAttention** — KV cache eviction via RoPE-inverted key scoring.
+- **TriAttention** — KV cache eviction via RoPE-inverted key scoring; implemented and still
+  pending quality validation.
 
-All existing llama.cpp quantization types, model architectures, and backends continue to work
-unchanged (when using standard quantization types). TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`.
-Currently, TurboQuant is fully supported on CPU, CUDA, HIP/ROCm, and Metal. Other backends (like Vulkan, SYCL, WebGPU) do not yet support TurboQuant and will trigger errors or fallbacks if TurboQuant is enabled on them.
+Standard llama.cpp paths are intended to remain compatible when TurboQuant is not enabled.
+TurboQuant types are opt-in via `--cache-type-k` / `--cache-type-v`. Current implementation and
+validation coverage includes CPU, CUDA, HIP/ROCm, and Metal to different degrees described in this
+README and the validation docs. Other backends such as Vulkan, SYCL, and WebGPU do not yet support
+TurboQuant and may reject or fall back when TurboQuant is enabled.
 
 ### Why this exists
 
@@ -186,20 +216,24 @@ the **[Manifesto](MANIFESTO.md)**.
 
 ## Current Status
 
+Status labels below describe the repository's present engineering state. A component marked
+**Validated** is validated only to the extent documented by its tests and recorded environments;
+it is not a claim of exhaustive validation across all models and hardware.
+
 | Component | Status |
 |---|---|
 | CPU TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
 | CUDA TurboQuant (turbo2, turbo3, turbo4) | ✅ Validated |
 | CPU/CUDA Mathematical Equivalence Audit | ✅ Complete |
-| Flash Attention Integration | ✅ Stable |
+| Flash Attention Integration | ✅ Stable on validated paths |
 | KV Cache Layer-Adaptive Quantization | ✅ Working |
-| Quality Gate (automated PPL + speed) | ✅ Operational |
+| Quality Gate (automated PPL + speed) | ✅ Operational regression gate |
 | Paged Attention (Phase 1) | ✅ Functional |
-| Paged Attention (Phase 2) | ✅ Validated on CUDA 2026-07-09 — `LLAMA_PAGING=1 test-llama-archs` 0 failures; opt-in via `LLAMA_PAGING=1` |
+| Paged Attention (Phase 2) | ✅ Validated on CUDA 2026-07-09 — `LLAMA_PAGING=1 test-llama-archs` 0 failures in recorded run; opt-in via `LLAMA_PAGING=1` |
 | TriAttention | 🚧 Implemented — Pending Validation |
 | TriAttention Calibration (M007) | 🔄 H6.1 INDETERMINADO — batch mode prevents eviction; generation-mode eval needed |
-| ROCm / HIP (turbo2/3/4 + Flash Attention) | ✅ Validated on gfx1100 (RDNA3, ROCm 7.2.4) 2026-07-13 — all KV configs pass (`amd-validate.sh` 6/6); PagedAttention (`LLAMA_PAGING=1`) is still CUDA-only |
-| Metal Support | ✅ Stable |
+| ROCm / HIP (turbo2/3/4 + Flash Attention) | ✅ Validated on gfx1100 (RDNA3, ROCm 7.2.4) 2026-07-13 — all recorded KV configs pass (`amd-validate.sh` 6/6); PagedAttention (`LLAMA_PAGING=1`) is still CUDA-only |
+| Metal Support | ✅ Implemented / validated on documented paths |
 | Vulkan Support | ❌ Not Started |
 
 ### Quantization Types
@@ -217,7 +251,9 @@ on groups of 128 elements (typically one head dimension).
 
 ## Benchmarks — RTX 2050 (4 GB VRAM)
 
-Measured with `scripts/benchmark.py`, full GPU offload (`-ngl 99`), 32 tokens, 2 runs.
+Measured with `scripts/benchmark.py`, full GPU offload (`-ngl 99`), 32 tokens, 2 runs. These
+numbers characterize that recorded setup; the small run count makes them useful as engineering
+measurements, not as population-level performance estimates.
 
 | Model | Size | Prompt (t/s) | Generation (t/s) |
 |---|---|---|---|
@@ -226,8 +262,9 @@ Measured with `scripts/benchmark.py`, full GPU offload (`-ngl 99`), 32 tokens, 2
 | llama3.2-3b | 1.9 GB | 1833 | 50.2 |
 | llama3.1-8b Q2_K | 3.0 GB | 715 | 29.7 |
 
-All sub-4 GB quantized models run comfortably. IQ-family quants (IQ2_S, IQ3_XS) are not
-yet supported (require importance-based quantization kernels from upstream llama.cpp).
+The listed sub-4 GB quantized models ran successfully in this setup. IQ-family quants (IQ2_S,
+IQ3_XS) are not yet supported (require importance-based quantization kernels from upstream
+llama.cpp).
 
 ---
 
@@ -242,9 +279,11 @@ TurboQuant KV compression on real AMD hardware. Model: Qwen2.5-Coder-7B-Q8_0,
 | `q8_0` K / `turbo3` V | 4.6× | 2808.6 | 75.0 |
 | `q8_0` K / `turbo2` V | 6.4× | 2797.4 | 75.7 |
 
-TurboQuant costs ~0.5% of prompt throughput and ~6% of generation throughput while shrinking
-the value cache 4.6–6.4×. On RDNA3 the compression is effectively free at the token level — the
-savings land in KV memory, which is what lets long contexts fit in VRAM.
+In this RDNA3 benchmark, TurboQuant measured roughly 0.5% lower prompt throughput and roughly 6%
+lower generation throughput while reducing the value-cache representation by 4.6–6.4×. The
+memory reduction is the demonstrated result; whether it translates into a useful long-context
+advantage depends on model, context, backend, available VRAM, and workload and should be measured
+explicitly for those scenarios.
 
 ---
 
@@ -252,8 +291,8 @@ savings land in KV memory, which is what lets long contexts fit in VRAM.
 
 ### CPU/CUDA Mathematical Consistency Audit
 
-The implementation has undergone a complete mathematical consistency audit verifying that
-CPU and CUDA paths share identical numerical contracts:
+The implementation has undergone a mathematical consistency audit of the listed CPU and CUDA
+contracts:
 
 | Checked Item | Status |
 |---|---|
@@ -268,12 +307,13 @@ CPU and CUDA paths share identical numerical contracts:
 | InnerQ scaling contract | ✅ Correct |
 | WHT-only rotation (post-turbo4-fix) | ✅ Shared contract |
 
-**Engineering verdict:**
+**Engineering verdict for the audited paths:**
 
-> No correctness-critical CPU/CUDA mathematical mismatches remain.
+> No correctness-critical CPU/CUDA mathematical mismatch was found in the contracts listed above
+> after the documented fixes.
 
-This marks a transition: the project has moved from debugging the implementation to building
-new capabilities on a validated foundation.
+This provides a validated foundation for those audited paths while leaving new backends, models,
+features, and future changes subject to their own regression and validation work.
 
 ### Llama-3.2-3B F16 — Perplexity
 
@@ -286,9 +326,10 @@ new capabilities on a validated foundation.
 | turbo4 V | 8.76 |
 | turbo4 K + turbo4 V | 8.99 |
 
-CPU TurboQuant is validated for Llama-family models. The `turbo4` types show less than 0.4
-PPL degradation from baseline, `turbo3` less than 0.8 PPL. The asymmetric policy
-(`q8_0` K + `turbo4` V) is within 0.1 PPL of baseline.
+For this Llama-3.2-3B evaluation, `turbo4` shows less than 0.4 PPL degradation from the recorded
+baseline and `turbo3` less than 0.8 PPL. The tested asymmetric configuration is within 0.1 PPL of
+the recorded baseline. These figures characterize this experiment and should not be generalized
+to other model families without measurement.
 
 > **Note:** These results were generated using `llama-perplexity` on wikitext-2 with the
 > infrastructure documented in [docs/validation.md](docs/validation.md).
@@ -320,7 +361,7 @@ rotation and FWHT are fundamentally different transforms.
 
 The FWHT is an orthogonal linear transform requiring only O(d log d) operations (896 ops for
 d=128) compared to O(d²) for dense rotation (16384 ops). Both CPU and GPU now apply the
-exact same mathematical transform, producing bit-identical results for equivalent inputs.
+same mathematical transform in the audited implementation path.
 
 The sign arrays (`turbo_cpu_s1[128]`, `turbo_cpu_s2[128]`) replace 64 KB of dense rotation
 matrices with 512 bytes of pre-computed WHT signs.
@@ -330,7 +371,7 @@ matrices with 512 bytes of pre-computed WHT signs.
 ## Root Cause Analysis: Double Inverse WHT on ROCm Decode
 
 A critical bug caused turbo V types (turbo2/3/4) to produce garbage output during decode
-on all GPU backends (CUDA/HIP), masked on CUDA by a coincidentally-correct warmup path.
+on the affected GPU path before the documented fix.
 
 ### The Problem
 
@@ -343,14 +384,14 @@ output in the WHT domain instead of the original domain.
 The VEC kernel's inverse was also incomplete: it did not apply the InnerQ `scale_inv`
 correction that the graph-side `ggml_turbo_wht` includes.
 
-Symptom: first 1–2 tokens correct (prefill reads original f16 V), then catastrophic corruption
-(decode reads from turbo-quantized KV cache).
+Symptom observed in the affected path: first 1–2 tokens correct (prefill reads original f16 V),
+then catastrophic corruption (decode reads from turbo-quantized KV cache).
 
 ### The Fix (commit `1beb7e1`)
 
 Removed the in-kernel inverse WHT from `fattn-vec.cuh` (lines 689–777). The graph-side
-`ggml_turbo_wht` is now the single source of truth for the inverse transform, handling all
-FA backends (VEC, MMA, tile) and including the InnerQ scale correction.
+`ggml_turbo_wht` is now the single source of truth for the inverse transform in the documented
+paths, including the InnerQ scale correction.
 
 ### Why This Works
 
@@ -358,11 +399,11 @@ FA backends (VEC, MMA, tile) and including the InnerQ scale correction.
 - **MMA/tile kernels** (prefill, ncols>1): output in WHT domain → graph-side inverse corrects.
 - **Non-FA path** (`ggml_mul_mat`): graph-side inverse handles this independently.
 
-All paths converge on a single, complete inverse WHT with InnerQ scaling.
+The validated paths converge on a single, complete inverse WHT with InnerQ scaling.
 
 ## Qwen Compatibility
 
-Testing on Qwen-family models revealed anomalous perplexity results across all low-bit KV
+Testing on Qwen-family models revealed anomalous perplexity results across the tested low-bit KV
 cache quantization methods:
 
 | Configuration | PPL |
@@ -375,24 +416,22 @@ cache quantization methods:
 
 ### Current Evidence
 
-The current evidence points to a model/quantizer compatibility issue rather than a TurboQuant
-implementation defect:
+The current evidence is consistent with a model/quantizer compatibility issue rather than, by
+itself, isolating a TurboQuant implementation defect:
 
-- Plain `q4_0` KV quantization already fails dramatically (PPL = 531 vs 11.79 baseline).
-- The failure pattern is consistent across all low-bit quantizers tested — TurboQuant, q4_0,
-  and others degrade similarly on this model family.
-- Models that fail with q4_0 K also fail with turbo3 K and turbo4 K, suggesting the root
-  cause is in the data distribution, not the codec.
+- Plain `q4_0` KV quantization already fails dramatically in this experiment (PPL = 531 vs
+  11.79 baseline).
+- The failure pattern is present across the low-bit quantizers tested in this experiment.
+- Models that fail with q4_0 K also fail with turbo3 K and turbo4 K in the recorded tests.
 
-**Likely cause**: Large K activation outliers that cannot be represented by low-bit
-quantization. Standard MSE-optimal quantizers (including q4_0) fail because the outliers
-dominate the quantization range, leaving insufficient precision for the remaining values.
+**Candidate explanation**: Large K activation outliers may be difficult to represent with these
+low-bit quantization schemes. This remains a hypothesis until isolated by further experiments.
 
 > **Note**: This conclusion represents current evidence, not absolute fact. The investigation
 > remains open if new data emerges.
 
-**Workaround**: Use `f16` or `q8_0` for K cache, apply turbo types only to V cache
-(`--cache-type-v turbo3`).
+**Workaround for the affected tested models**: Use `f16` or `q8_0` for K cache, apply turbo types
+only to V cache (`--cache-type-v turbo3`).
 
 ---
 
@@ -440,10 +479,10 @@ KV Cache (per layer)
 
 | Milestone | Status |
 |---|---|
-| TurboQuant CPU correctness | ✅ |
-| TurboQuant CUDA correctness | ✅ |
+| TurboQuant CPU correctness on documented validation suite | ✅ |
+| TurboQuant CUDA correctness on documented validation suite | ✅ |
 | CPU/CUDA mathematical equivalence audit | ✅ |
-| Llama validation (PPL within 0.4 for turbo4) | ✅ |
+| Llama validation (recorded PPL within 0.4 for turbo4) | ✅ |
 | Initial ROCm portability audit | ✅ |
 
 ### Upcoming
@@ -458,14 +497,14 @@ KV Cache (per layer)
 | Upstream synchronization | P3 |
 | Vulkan TurboQuant kernels | P3 |
 
-The project has transitioned from debugging the implementation to building new capabilities
-on a validated foundation.
+The completed milestones provide an engineering foundation for the tested paths; broader claims
+remain tied to future validation on additional workloads and hardware.
 
 ---
 
 ## Roadmap
 
-### Phase 1 — TurboQuant (Complete)
+### Phase 1 — TurboQuant (Implementation Complete)
 
 - [x] TurboQuant type definitions (turbo2, turbo3, turbo4)
 - [x] CPU quantize/dequantize kernels
@@ -478,26 +517,26 @@ on a validated foundation.
 - [x] Layer-adaptive quantization modes
 - [x] Boundary V protection for turbo2 V
 
-### Phase 2 — Validation (Complete)
+### Phase 2 — Validation Infrastructure / Recorded Validation (Complete for listed scope)
 
 - [x] Round-trip quantization test (`tests/test-turbo-quant.c`)
 - [x] Automated quality gate (`scripts/turbo-quality-gate.sh`)
-- [x] Perplexity validation on Llama models
+- [x] Perplexity validation on documented Llama model(s)
 - [x] CPU-GPU consistency fix (FWHT alignment)
 - [x] HIP/ROCm port for turbo3/turbo2
 
 ### Phase 3 — Paged Attention (In Progress)
 
 - [x] Phase 1: Gather-before-FA with dynamic page allocation (✅ Functional)
-- [x] Phase 2: Native paged FA (page-table-lookup in kernel) (✅ Validated on CUDA — `LLAMA_PAGING=1 test-llama-archs` 0 failures, 2026-07-09)
-- [x] Phase 3: TriAttention KV eviction via RoPE-inverted key scoring (🚧 Pending Validation)
+- [x] Phase 2: Native paged FA (page-table-lookup in kernel) (✅ Validated on CUDA — `LLAMA_PAGING=1 test-llama-archs` 0 failures in recorded run, 2026-07-09)
+- [x] Phase 3: TriAttention KV eviction via RoPE-inverted key scoring (🚧 Implemented, Pending Validation)
 - [x] M007: TriAttention calibration infrastructure (`scripts/triattention_calibrate.py`, milestone stubs, calibration run complete — H6.1 INDETERMINADO; generation-mode eval required)
 - [ ] Sliding window support
 - [ ] Continuous batching
 
 ### Research Scripts
 
-- `scripts/turbo-quality-gate.sh` — automated PPL + speed quality gate
+- `scripts/turbo-quality-gate.sh` — automated PPL + speed regression gate
 - `scripts/triattention_calibrate.py` — baseline vs eviction calibration runner for H6.1; writes `research/milestone-007/calibration_results.json`
 - `scripts/multiswarm.py` — multi-agent task runner; `--audit` / `--audit-scope` mode runs opencode as a code auditor and writes `.multiswarm_audit.md`
 
@@ -514,7 +553,7 @@ on a validated foundation.
 - [ ] Multi-GPU paged attention
 - [ ] Zero-overhead FA dequant (eliminate gather)
 - [ ] Adaptive bit-width selection per layer
-- [ ] Layer-wise inference / weight streaming (AirLLM-style) — 70B on 4 GB VRAM without quantization
+- [ ] Layer-wise inference / weight streaming (AirLLM-style) — investigate very-large-model inference on highly constrained VRAM without weight quantization
 - [ ] Prefetch-compute overlap for layer streaming
 - [ ] codebase-memory-mcp integration for Research OS agent navigation
 - [ ] **Commodity-hardware efficiency** ([FFAI](https://github.com/thewafflehaus/FFAI)-inspired) — the *efficient-on-hardware-you-own* half of the mission, not just *lighter*: precompiled-kernel warmup (cut Metal cold-start / time-to-first-token), a CPU↔GPU dispatch-overhead audit (ties into the single-GPU sync debt), and an AURA-vs-TurboQuant KV-compression benchmark. Ideas only — mallana stays a portable multi-backend fork; measurement first. See [docs/roadmap.md](docs/roadmap.md#commodity-hardware-efficiency-ffai-inspired).
@@ -589,13 +628,13 @@ cmake -B build -DGGML_HIP=ON -DCMAKE_HIP_ARCHITECTURES="gfx1100;gfx942;gfx950" &
 ### Usage
 
 ```bash
-# Recommended default (asymmetric turbo)
+# Recommended default based on current asymmetric-policy evidence
 llama-cli -m model.gguf --cache-type-k q8_0 --cache-type-v turbo3 --fa on
 
-# Aggressive V compression at long context
+# Aggressive V compression at long context — validate quality for your model
 llama-cli -m model.gguf --cache-type-k q8_0 --cache-type-v turbo2 -c 131072
 
-# Conservative (first contact with new model)
+# Conservative first contact with a new model
 llama-cli -m model.gguf --cache-type-k f16 --cache-type-v turbo4
 ```
 
@@ -608,9 +647,11 @@ See [docs/turboquant.md](docs/turboquant.md) for detailed configuration guidance
 TurboQuant is inspired by:
 
 - **TurboQuant** (ICLR 2026) — Google's original paper introducing Walsh-Hadamard-rotated
-  polar codebook quantization for KV cache, demonstrating 4.6× compression at ~1% PPL loss.
-- **Asymmetric K/V compression** — Empirical finding that V tolerates aggressive compression
-  while K does not, driving the asymmetric default policy.
+  polar codebook quantization for KV cache, reporting 4.6× compression at ~1% PPL loss in the
+  paper's evaluated conditions.
+- **Asymmetric K/V compression** — Mallana's empirical observation that V tolerated more
+  aggressive compression than K in the recorded experiments, driving the current asymmetric
+  default policy.
 - **PagedAttention** (Kwon et al. 2023, arXiv:2309.06180) — Non-contiguous KV cache with
   page-table indirection for efficient memory management.
 
